@@ -1,58 +1,58 @@
-PY := .venv/bin/python
-PIP := .venv/bin/pip
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+VENV_PY := .venv/bin/python
 
 .PHONY: setup fmt lint type test record-tests audit scan secret-scan quality backtest-sample paper-sim fixtures archive archive-check clean
 
 setup:
 	python3 -m venv .venv
-	$(PIP) install -U pip
-	$(PIP) install -r requirements-dev.txt
-	$(PIP) install -e .
+	$(VENV_PY) -m pip install -U pip
+	$(VENV_PY) -m pip install -r requirements-dev.txt
+	$(VENV_PY) -m pip install -e .
 
 fmt:
-	.venv/bin/ruff format src tests scripts
+	$(PYTHON) -m ruff format src tests scripts
 
 lint:
-	.venv/bin/ruff format --check src tests scripts
-	.venv/bin/ruff check src tests scripts
+	$(PYTHON) -m ruff format --check src tests scripts
+	$(PYTHON) -m ruff check src tests scripts
 
 type:
-	.venv/bin/mypy
+	$(PYTHON) -m mypy
 
 test:
-	$(PY) -m pytest tests -q
+	$(PYTHON) -m pytest tests -q
 
 record-tests:
-	$(PY) scripts/record_test_run.py
+	$(PYTHON) scripts/record_test_run.py
 
 audit:
-	.venv/bin/pip-audit --strict -r requirements.txt
+	$(PYTHON) -m pip_audit --strict -r requirements.txt
 
 scan:
-	.venv/bin/bandit -c pyproject.toml -r src -q
+	$(PYTHON) -m bandit -c pyproject.toml -r src -q
 
 secret-scan:
-	$(PY) scripts/secret_scan.py
+	$(PYTHON) scripts/secret_scan.py
 
 quality: lint type scan audit secret-scan record-tests
 
 archive:
-	$(PY) scripts/build_archive.py
+	$(PYTHON) scripts/build_archive.py
 
 archive-check:
-	$(PY) scripts/build_archive.py
-	$(PY) scripts/verify_release_archive.py dist/trading-bot-source.tar.gz
+	$(PYTHON) scripts/build_archive.py
+	$(PYTHON) scripts/verify_release_archive.py dist/trading-bot-source.tar.gz
 
 fixtures:
-	$(PY) scripts/generate_fixtures.py
+	$(PYTHON) scripts/generate_fixtures.py
 
 backtest-sample:
-	PYTHONPATH=src $(PY) -m trading_bot --config config/paper.yaml backtest run \
+	PYTHONPATH=src $(PYTHON) -m trading_bot --config config/paper.yaml backtest run \
 		--data data/fixtures/btcusdt_1h.csv
 
 paper-sim:
 	@# offline paper simulation over fixture data (no network, no credentials)
-	PYTHONPATH=src $(PY) -m trading_bot --config config/paper.fixture.yaml paper run --cycles 500
+	PYTHONPATH=src $(PYTHON) -m trading_bot --config config/paper.fixture.yaml paper run --cycles 500
 
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage var/tmp
