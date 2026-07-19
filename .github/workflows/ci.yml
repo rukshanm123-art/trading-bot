@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Format check
+        run: ruff format --check src tests scripts
+
+      - name: Lint
+        run: ruff check src tests scripts
+
+      - name: Type check
+        run: mypy
+
+      - name: Migration validation (fresh SQLite)
+        run: |
+          python - <<'EOF'
+          from trading_bot.storage.db import Database
+          db = Database("sqlite:///:memory:")
+          applied = db.migrate("migrations")
+          assert applied, "no migrations applied"
+          assert db.integrity_check()
+          print("migrations OK:", applied)
+          EOF
+
+      - name: Tests (unit + integration + security + property) with quality record
+        run: python scripts/record_test_run.py
+
+      - name: Verify quality evidence
+        run: python -m trading_bot quality verify
+
+      - name: Release archive hygiene
+        run: |
+          python scripts/build_archive.py dist/trading-bot-source.tar.gz
+          python scripts/verify_release_archive.py dist/trading-bot-source.tar.gz
+
+      - name: Security scan (bandit)
+        run: bandit -c pyproject.toml -r src -q
+
+      - name: Dependency vulnerability scan (pip-audit)
+        run: pip-audit --strict -r requirements.txt
+
+      - name: Local secret pattern scan
+        run: make secret-scan
+
+      - name: Upload quality record
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-record
+          path: var/quality/latest_test_run.json
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t trading-bot:ci .
+      - name: Container smoke test (paper CLI, no network trading)
+        run: |
+          docker run --rm trading-bot:ci \
+            python -m trading_bot --config config/paper.fixture.yaml version
+
+# CI never holds live credentials and never places orders: no secrets are
+# injected here, integration tests run on fixtures/mocks only, and live mode
+# is locked by the runtime gate regardless.

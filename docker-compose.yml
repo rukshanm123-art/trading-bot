@@ -1,0 +1,52 @@
+# Local/production compose: bot + PostgreSQL.
+# Copy .env.example -> .env first. The bot starts in PAPER mode.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trading_bot
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bot -d trading_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # not exposed to the host by default; the bot reaches it on the compose network
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://bot:${POSTGRES_PASSWORD:?}@db:5432/trading_bot
+      TRADING_KILL_SWITCH: ${TRADING_KILL_SWITCH:-false}
+      LIVE_TRADING_ENABLED: "false"   # deliberate: enabling live is a manual edit
+      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY:-}
+      BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      MONITORING_TOKEN: ${MONITORING_TOKEN:-}
+    volumes:
+      - botvar:/app/var
+    # Monitoring stays loopback-only INSIDE the container by default.
+    # To scrape from the host, set monitoring.host: 0.0.0.0 in config
+    # (see docs/SECURITY.md) and uncomment:
+    # ports:
+    #   - "127.0.0.1:9754:9754"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  pgdata:
+  botvar:

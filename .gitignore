@@ -1,0 +1,28 @@
+# Secrets — never commit
+.env
+*.env
+!.env.example
+*.pem
+*.key
+
+# Runtime state
+var/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
