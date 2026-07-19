@@ -1,0 +1,14 @@
+title = "trading-bot secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Exact synthetic tokens used by credential-isolation and redaction tests"
+regexes = [
+  '''^(?:testnet|live)-(?:key|secret)-0123456789abcdef$''',
+  '''^other-secret-0123456789$''',
+  '''^sk-verysecretapikey1234567890$''',
+  '''^AbCdEf0123456789XyZ$''',
+  '''^abcdefgh12345678$''',
+]
