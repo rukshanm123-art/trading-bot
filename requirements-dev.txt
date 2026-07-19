@@ -1,0 +1,11 @@
+# Development / CI dependencies — pinned.
+-r requirements.txt
+pytest==8.3.4
+pytest-cov==6.0.0
+hypothesis==6.122.3
+ruff==0.8.4
+mypy==1.14.0
+types-requests==2.32.0.20241016
+types-PyYAML==6.0.12.20240917
+bandit==1.8.0
+pip-audit==2.7.3

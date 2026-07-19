@@ -1,0 +1,6 @@
+# Runtime dependencies — pinned for reproducible deploys.
+# Regenerate with: pip install pip-tools && pip-compile pyproject.toml
+requests==2.34.2
+pydantic==2.10.4
+PyYAML==6.0.2
+rich==13.9.4

@@ -1,0 +1,77 @@
+# PAPER mode over OFFLINE fixture data — deterministic simulation, no network.
+# Used by `make paper-sim` and offline scenario testing.
+mode: paper
+symbol: BTCUSDT
+interval: 1h
+timezone: Pacific/Auckland
+
+db:
+  url: sqlite:///var/trading_bot_fixture.db
+
+data:
+  source: fixture
+  fixture_path: data/fixtures/btcusdt_1h.csv
+
+strategy:
+  name: ema_trend
+  version: "1.0.0"
+  params:
+    fast: 12
+    slow: 26
+    stop_loss_pct: "2.0"
+
+risk:
+  max_open_positions: 1
+  max_position_allocation_pct: "20"
+  min_cash_reserve_pct: "50"
+  max_risk_per_trade_pct: "0.5"
+  max_daily_loss_pct: "2"
+  max_7d_loss_pct: "5"
+  max_drawdown_pct: "8"
+  max_entries_per_day: 2
+  cooldown_after_loss_hours: 12
+  pause_after_consecutive_losses: 3
+  max_slippage_bps: "50"
+  max_spread_bps: "20"
+  max_quote_age_s: 120
+  candle_grace_s: 90
+  max_gap_pct: "10"
+  max_api_errors_per_hour: 10
+  max_reconciliation_mismatch_quote: "0.05"
+  protective_exit_buffer_bps: "100"
+  max_clock_skew_s: 30
+  market_data_recovery_successes: 2
+
+execution:
+  order_type: MARKET
+  limit_timeout_s: 60
+  max_order_age_s: 120
+  submit_timeout_s: 10
+
+paper:
+  starting_quote: "30"
+  seed: 42
+  taker_fee_bps: "10"
+  spread_bps: "5"
+  slippage_bps_max: "8"
+  reject_probability: "0.02"
+  partial_fill_probability: "0.10"
+  latency_ms: 0
+
+continuation:
+  mode: auto_continue
+  approve_default_hours: 24
+
+notifications:
+  console: true
+  email: { enabled: false }
+  telegram: { enabled: false }
+
+monitoring:
+  enabled: false
+
+reporting:
+  daily_time_local: "17:00"
+  output_dir: var/reports
+
+emergency_position_policy: hold_and_monitor

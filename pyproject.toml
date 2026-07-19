@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-bot"
+version = "1.0.0"
+description = "Safety-first automated cryptocurrency spot-trading system (paper-first, risk-gated, auditable)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.32.3,<3",
+    "pydantic>=2.9,<3",
+    "PyYAML>=6.0.2,<7",
+    "rich>=13.9,<15",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2,<4"]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6.0,<7",
+    "hypothesis>=6.115,<7",
+    "ruff>=0.8.0,<0.9",
+    "mypy>=1.13,<2",
+    "types-requests",
+    "types-PyYAML",
+    "bandit>=1.8,<2",
+    "pip-audit>=2.7,<3",
+]
+
+[project.scripts]
+trading-bot = "trading_bot.cli.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+exclude = ["var", "data", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "N", "RUF"]
+ignore = [
+    "S101", # assert usage — fine in this codebase and required in tests
+    "S311", # random module — used only for SIMULATION (paper fills), never for secrets
+    "E501", # line length handled by formatter
+    "N812", # `from trading_bot.config import constants as C` is a deliberate convention
+    "N818", # exception naming: ExchangeUnavailable reads better than ...Error
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B017"]
+"scripts/**" = ["S"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["trading_bot"]
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+check_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "integration: integration tests (offline, fixture/mock driven)",
+    "security: security-focused tests",
+    "property: property-based tests",
+]
+
+[tool.coverage.run]
+source = ["src/trading_bot"]
+
+[tool.coverage.report]
+fail_under = 90
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "var", "data"]
+skips = ["B101", "B311"]
