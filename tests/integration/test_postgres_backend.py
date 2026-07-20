@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from tests.conftest import MIGRATIONS
-from tests.helpers import RULES, T0
+from tests.helpers import RULES, T0, make_config
 from trading_bot.core.enums import Mode, OrderState, OrderType, Side
 from trading_bot.core.models import Fill, OrderResponse, SizedOrder
 from trading_bot.core.types import dec
 from trading_bot.engine.scheduler import InstanceLock
+from trading_bot.engine.trader import TradingEngine
 from trading_bot.exchange.interface import FrozenClock
 from trading_bot.portfolio.accounting import PortfolioService
+from trading_bot.security.qualification import (
+    QualificationEvidenceStore,
+    get_or_create_evidence_key,
+)
 from trading_bot.storage.db import Database
 from trading_bot.storage.repositories import Repositories
 
@@ -168,3 +175,35 @@ def test_postgres_instance_lock_excludes_second_connection():
     finally:
         first_db.close()
         second_db.close()
+
+
+def test_postgres_qualification_evidence_records_backend_provenance(tmp_path, monkeypatch):
+    db = Database(os.environ["TEST_POSTGRES_URL"])
+    try:
+        db.migrate(MIGRATIONS)
+        repos = Repositories(db)
+        engine = TradingEngine.__new__(TradingEngine)
+        engine.cfg = make_config(
+            db={"url": os.environ["TEST_POSTGRES_URL"]}, data={"source": "exchange"}
+        )
+        engine.fixture = None
+        engine.db = db
+        engine.root = tmp_path
+        engine.repos = repos
+        engine._session_wall_start = datetime.now(UTC) - timedelta(minutes=5)
+        engine._session_decisions_start = repos.decisions.count(Mode.PAPER)
+        engine.cfg_hash = "postgres-qualification-config"
+        engine.strategy = SimpleNamespace(name="probe", version="1")
+
+        monkeypatch.setattr(
+            "trading_bot.security.quality.git_info",
+            lambda _root: ("deadbeef", False, "repo"),
+        )
+        engine._record_session_evidence()
+
+        store = QualificationEvidenceStore(tmp_path, key=get_or_create_evidence_key(repos.flags))
+        records = store.records(validate=True)
+        assert len(records) == 1
+        assert records[0]["payload"]["database_backend"] == "postgres"
+    finally:
+        db.close()

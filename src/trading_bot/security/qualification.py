@@ -17,6 +17,9 @@ every check below:
   ``QUALIFICATION_MIN_DECISIONS_PER_DAY`` recorded paper decisions in the
   decisions table for that same day. Evidence about days the database never
   saw counts nothing.
+- **PostgreSQL provenance.** Records must declare that the qualifying session
+  used PostgreSQL. SQLite sessions are deliberately non-qualifying so the
+  eventual LIVE database contains the evidence key, decisions and reports.
 - **No backdating.** ``recorded_at`` must be at or after the session end and
   non-decreasing along the chain.
 
@@ -151,6 +154,9 @@ class QualificationEvidenceStore:
             source_mode = payload.get("source_mode")
             data_source = payload.get("data_source_class")
             if source_mode != "paper" or data_source != "live_market":
+                continue
+            if payload.get("database_backend") != "postgres":
+                failures.append("eligible paper evidence was not recorded on PostgreSQL")
                 continue
             if payload.get("git_state") == "no_repo" or not payload.get("git_commit"):
                 failures.append("eligible paper evidence missing git commit")

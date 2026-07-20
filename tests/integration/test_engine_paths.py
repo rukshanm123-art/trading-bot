@@ -66,9 +66,8 @@ def test_escalation_to_market_on_gap_through(tmp_path):
     engine.db.close()
 
 
-def test_qualification_evidence_recorded_for_live_data_paper(tmp_path, monkeypatch):
-    """A PAPER session on live-market data records ONE signed evidence row on
-    shutdown; fixture sessions record none."""
+def test_sqlite_live_paper_does_not_record_qualification_evidence(tmp_path, monkeypatch):
+    """Live-market PAPER on SQLite is useful but deliberately non-qualifying."""
     from trading_bot.core.models import Candle, PriceQuote, utcnow
     from trading_bot.security.qualification import (
         QualificationEvidenceStore,
@@ -135,11 +134,7 @@ def test_qualification_evidence_recorded_for_live_data_paper(tmp_path, monkeypat
     store = QualificationEvidenceStore(tmp_path, key=get_or_create_evidence_key(engine.repos.flags))
     rows = store.records(validate=True)
     engine.db.close()
-    assert len(rows) == 1
-    payload = rows[0]["payload"]
-    assert payload["source_mode"] == "paper"
-    assert payload["data_source_class"] == "live_market"
-    assert "wall_clock_start" in payload and "wall_clock_end" in payload
+    assert rows == []
 
 
 def test_unexpected_runtime_failure_blocks_future_entries(tmp_path):

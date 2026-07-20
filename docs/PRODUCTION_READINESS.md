@@ -40,7 +40,9 @@ The exchange integration is aligned with the current official Binance Spot
 Do not use real funds while any item below is incomplete:
 
 - [ ] At least 30 distinct days and 300 decisions of signed qualification
-      evidence from PAPER using live public market data—not fixtures/backtests.
+      evidence from PAPER using live public market data and the same long-lived
+      PostgreSQL deployment later inspected by the LIVE gate. SQLite,
+      fixtures and backtests count as zero qualification days.
 - [ ] Two to four weeks on Spot Testnet, including every restart, partial-fill,
       network-loss, clock-skew, stale-order and kill-switch drill in
       `LIVE_TRADING_CHECKLIST.md`.

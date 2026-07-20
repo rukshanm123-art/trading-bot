@@ -26,6 +26,12 @@ require editing the command/config deliberately — a restart or redeploy can
 never begin live trading by itself (the live gate re-checks everything at
 every startup).
 
+The default local `config/paper.yaml` uses SQLite for convenience and is
+non-qualifying. For the 30-day live-market qualification period, set
+`DATABASE_URL` to the long-lived PostgreSQL deployment before day one. The
+engine records qualification evidence only when its active backend is
+PostgreSQL; never store the connection password in YAML or Git.
+
 ### Startup sequence (every start, all modes)
 
 1. migrations → 2. config validation vs hard caps → 3. mode/endpoint/
@@ -112,6 +118,8 @@ of day to UTC query boundaries. UTC timestamps remain the storage format.
 - macOS: `docs/examples/com.trading-bot.paper.plist` is a launchd template
   (survives logout; adjust WorkingDirectory, then `launchctl load`).
 - Docker: `restart: unless-stopped` in compose provides the same property.
+- The supervisor inherits `DATABASE_URL`. Without that override, the default
+  SQLite run is explicitly non-qualifying and contributes zero LIVE paper days.
 - With native stops enabled, a crashed process leaves the protective
   STOP_LOSS_LIMIT resting ON the exchange; on restart, reconciliation adopts
   whatever happened while the bot was down (including a stop that filled).

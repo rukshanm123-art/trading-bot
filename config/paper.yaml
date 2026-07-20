@@ -9,6 +9,9 @@ interval: 1h
 timezone: Pacific/Auckland
 
 db:
+  # Safe for evaluation, but SQLite sessions DO NOT count toward LIVE
+  # qualification. Before qualification day one, provide the long-lived
+  # PostgreSQL database through DATABASE_URL (never commit its credentials).
   url: sqlite:///var/trading_bot.db
 
 data:

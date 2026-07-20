@@ -13,7 +13,10 @@ and no automatic promotion; the engine re-verifies gates at every startup.
 
 ## Stage 1 — engineering gates (verified by `live status`)
 
-- [ ] ≥ 30 calendar days of paper trading (`LIVE_MIN_PAPER_DAYS`)
+- [ ] Before day one, `DATABASE_URL` selects the long-lived PostgreSQL
+      qualification database. SQLite paper sessions count as zero days.
+- [ ] ≥ 30 calendar days of live-market paper trading on that PostgreSQL
+      database (`LIVE_MIN_PAPER_DAYS`)
 - [ ] ≥ 300 recorded paper decisions (`LIVE_MIN_PAPER_DECISIONS`)
 - [ ] Qualification evidence verifies as live-market paper operation. Backtest,
       historical fixture and offline simulation records count as zero days.
@@ -23,8 +26,8 @@ and no automatic promotion; the engine re-verifies gates at every startup.
       configured coverage threshold met, all named safety tests present
       (`python -m trading_bot quality run && python -m trading_bot quality verify`)
 - [ ] Risk limits explicitly present in the live config file
-- [ ] `DATABASE_URL` selects the tested PostgreSQL deployment; SQLite is
-      rejected by the LIVE gate
+- [ ] `DATABASE_URL` still selects the tested qualification PostgreSQL
+      deployment; its backup and restoration have been demonstrated
 - [ ] At least one external alert channel (Telegram or email) is enabled and
       has all required environment secrets; console-only alerting is rejected
       by configuration validation and the live gate

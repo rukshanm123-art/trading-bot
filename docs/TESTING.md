@@ -33,4 +33,4 @@ named safety regressions for trapped exits, partial fills, fail-closed
 reconciliation, endpoint isolation, backtest timing, timezone reporting,
 database closure, PostgreSQL accounting/locking, LIVE dependency checks,
 Retry-After handling, bounded quality execution, live qualification evidence,
-and quality-evidence tampering.
+PostgreSQL-only qualification provenance, and quality-evidence tampering.

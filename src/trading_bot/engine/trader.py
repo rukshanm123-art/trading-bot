@@ -303,6 +303,22 @@ class TradingEngine:
                 self.rules.quote_asset,
                 self.cfg.data.source,
             )
+            if self.cfg.data.source == "exchange":
+                if self.db.backend == "postgres":
+                    log.info(
+                        "qualification-eligible storage: live-market PAPER is using PostgreSQL"
+                    )
+                    HEALTH.note("qualification", "eligible storage: PostgreSQL")
+                else:
+                    log.warning(
+                        "NON-QUALIFYING PAPER RUN: live-market PAPER is using SQLite. "
+                        "Set DATABASE_URL to the long-lived PostgreSQL qualification database "
+                        "before day one; this session will record no LIVE qualification evidence."
+                    )
+                    HEALTH.note(
+                        "qualification",
+                        "not eligible: live-market PAPER qualification requires PostgreSQL",
+                    )
 
     def _apply_account_fee(self) -> None:
         """Use the account's REAL taker commission for sizing instead of the
@@ -589,10 +605,16 @@ class TradingEngine:
 
     def _record_session_evidence(self) -> None:
         """Signed live-qualification evidence: only REAL paper sessions on
-        live market data count (fixtures and backtests record nothing)."""
+        live market data backed by PostgreSQL count. Fixtures, backtests and
+        SQLite paper sessions record nothing."""
         if self.cfg.mode != Mode.PAPER or self.fixture is not None:
             return
         if self.cfg.data.source != "exchange":
+            return
+        if self.db.backend != "postgres":
+            log.warning(
+                "qualification evidence not recorded: live-market PAPER must use PostgreSQL"
+            )
             return
         start = getattr(self, "_session_wall_start", None)
         if start is None:
@@ -614,6 +636,7 @@ class TradingEngine:
             {
                 "source_mode": "paper",
                 "data_source_class": "live_market",
+                "database_backend": self.db.backend,
                 "wall_clock_start": start.isoformat(),
                 "wall_clock_end": datetime.now(_UTC).isoformat(),
                 "eligible_decisions": decisions_now

@@ -96,6 +96,21 @@ PYTHONPATH=src .venv/bin/python -m trading_bot --config config/paper.fixture.yam
 PYTHONPATH=src .venv/bin/python -m trading_bot --config config/paper.yaml paper run
 ```
 
+The default SQLite paper database is intentionally convenient but does **not**
+count toward LIVE qualification. Before qualification day one, select the
+long-lived PostgreSQL database through the environment so its decisions,
+reports and evidence key remain in the database later inspected by the LIVE
+gate:
+
+```bash
+export DATABASE_URL='postgresql://bot:YOUR_PASSWORD@localhost:5432/trading_bot'
+PYTHONPATH=src .venv/bin/python -m trading_bot --config config/paper.yaml paper run
+```
+
+Do not put the database password in YAML or Git. Keep using the same PostgreSQL
+deployment throughout qualification; validate backup and restore before any
+later mode change.
+
 Useful commands:
 
 ```bash

@@ -208,6 +208,7 @@ def _paper_payload(**overrides):
     payload = {
         "source_mode": "paper",
         "data_source_class": "live_market",
+        "database_backend": "postgres",
         "wall_clock_start": datetime(2025, 1, 1, tzinfo=UTC).isoformat(),
         "wall_clock_end": datetime(2025, 1, 1, 23, tzinfo=UTC).isoformat(),
         "recorded_at": datetime(2025, 1, 1, 23, 1, tzinfo=UTC).isoformat(),
@@ -219,6 +220,18 @@ def _paper_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def test_sqlite_qualification_evidence_is_rejected(repos, tmp_path):
+    store = QualificationEvidenceStore(tmp_path)
+    store.append(_paper_payload(database_backend="sqlite"))
+
+    summary = store.summary(decision_days={"2025-01-01": 100})
+
+    assert not summary.ok
+    assert summary.paper_days == 0
+    assert summary.paper_decisions == 0
+    assert any("not recorded on PostgreSQL" in failure for failure in summary.failures)
 
 
 def test_one_real_wall_clock_paper_day_counts_once(repos, tmp_path):
