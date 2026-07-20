@@ -101,9 +101,17 @@ def run_backtest(
     )
     curve = [dec(str(r["equity"])) for r in snaps]
     closed = repos.positions.closed_positions(Mode.PAPER, limit=100000)
+    # Immutable realization rows are the source of truth for P&L, fees and
+    # turnover: residual position rows understate traded volume after
+    # partial exits and dust conversion.
+    realizations = repos.db.query(
+        "SELECT * FROM position_realizations WHERE mode = ? ORDER BY ts",
+        (Mode.PAPER.value,),
+    )
+    # win/loss statistics stay per-POSITION (a trade = one position lifecycle)
     pnls = [dec(str(r["realized_pnl"])) for r in closed if r["realized_pnl"] is not None]
-    exit_fees = [dec(str(r["exit_fee"])) for r in closed if r["exit_fee"] is not None]
-    entry_fees = [dec(str(r["entry_fee"])) for r in closed if r["entry_fee"] is not None]
+    exit_fees = [dec(str(r["exit_fee"])) for r in realizations]
+    entry_fees = [dec(str(r["entry_fee_allocated"])) for r in realizations]
     decisions = repos.decisions.count(Mode.PAPER)
 
     start_equity = curve[0] if curve else cfg.paper.starting_quote
@@ -134,8 +142,11 @@ def run_backtest(
         ).total_seconds()
 
     turnover = ZERO
-    for r in closed:
-        turnover += dec(str(r["qty"])) * dec(str(r["avg_entry_price"])) * 2
+    for r in realizations:
+        # entry leg + exit leg of the realized quantity
+        turnover += dec(str(r["qty"])) * (
+            dec(str(r["avg_entry_price"])) + dec(str(r["exit_price"]))
+        )
 
     periods_per_year = int(365 * 86400 / cfg.interval_seconds)
     ratios = ratio_metrics(curve, periods_per_year) if len(curve) > 3 else {}

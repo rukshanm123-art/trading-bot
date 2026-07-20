@@ -20,6 +20,7 @@ import logging
 import random
 from datetime import timedelta
 from decimal import Decimal
+from typing import Any
 
 from trading_bot.config.models import PaperSimConfig
 from trading_bot.core.enums import OrderState, OrderType, Side
@@ -153,13 +154,25 @@ class PaperExchange(ExchangeAdapter):
             return f"symbol status {r.status}"
         if request.order_type.value not in r.order_types:
             return f"order type {request.order_type.value} not supported"
-        if request.qty < r.min_qty:
-            return f"qty {request.qty} < minQty {r.min_qty}"
-        if r.step_size > ZERO and (request.qty % r.step_size) != ZERO:
-            return f"qty {request.qty} violates stepSize {r.step_size}"
+        if request.order_type == OrderType.STOP_LOSS_LIMIT:
+            if request.price is None or request.stop_price is None:
+                return "STOP_LOSS_LIMIT requires price and stopPrice"
+            if request.side != Side.SELL:
+                return "protective stops are SELL-only in this system"
+        quantity_min = r.quantity_min(request.order_type)
+        quantity_max = r.quantity_max(request.order_type)
+        quantity_step = r.quantity_step(request.order_type)
+        if request.qty < quantity_min:
+            return f"qty {request.qty} < effective minQty {quantity_min}"
+        if request.qty > quantity_max:
+            return f"qty {request.qty} > effective maxQty {quantity_max}"
+        if quantity_step > ZERO and (request.qty % quantity_step) != ZERO:
+            return f"qty {request.qty} violates effective stepSize {quantity_step}"
         notional = request.qty * ref_price
         if notional < r.min_notional:
             return f"notional {notional} < minNotional {r.min_notional}"
+        if r.max_notional > ZERO and notional > r.max_notional:
+            return f"notional {notional} > maxNotional {r.max_notional}"
         return None
 
     def create_order(self, request: OrderRequest) -> OrderResponse:
@@ -177,7 +190,7 @@ class PaperExchange(ExchangeAdapter):
             reason = "simulated exchange rejection"
 
         if reason is not None:
-            stored = {
+            stored: dict[str, Any] = {
                 "request": self._request_dict(request),
                 "state": OrderState.REJECTED.value,
                 "raw_status": "REJECTED",
@@ -190,6 +203,39 @@ class PaperExchange(ExchangeAdapter):
             orders[request.client_order_id] = stored
             self._save_orders(orders)
             log.info("paper order %s rejected: %s", request.client_order_id, reason)
+            return self._response_from_stored(stored)
+
+        # STOP_LOSS_LIMIT (protective sell): Binance rejects a stop that would
+        # trigger immediately; otherwise the order rests until triggered.
+        if request.order_type == OrderType.STOP_LOSS_LIMIT:
+            assert request.stop_price is not None  # validated above
+            if quote.bid <= request.stop_price:
+                stored = {
+                    "request": self._request_dict(request),
+                    "state": OrderState.REJECTED.value,
+                    "raw_status": "REJECTED",
+                    "executed_qty": "0",
+                    "cumulative_quote": "0",
+                    "fills": [],
+                    "ts": iso(now),
+                    "reject_reason": "stop price would trigger immediately",
+                }
+                orders[request.client_order_id] = stored
+                self._save_orders(orders)
+                return self._response_from_stored(stored)
+            self._lock_for_order(request, quote.mid)
+            stored = {
+                "request": self._request_dict(request),
+                "state": OrderState.ACKNOWLEDGED.value,
+                "raw_status": "NEW",
+                "executed_qty": "0",
+                "cumulative_quote": "0",
+                "fills": [],
+                "ts": iso(now),
+                "triggered": False,
+            }
+            orders[request.client_order_id] = stored
+            self._save_orders(orders)
             return self._response_from_stored(stored)
 
         fill_price = self._fill_price(request.side, quote, rng)
@@ -224,9 +270,10 @@ class PaperExchange(ExchangeAdapter):
         partial = rng.random() < float(self.cfg.partial_fill_probability)
         if partial:
             fraction = dec("0.4")
-            candidate = quantize_down(request.qty * fraction, self.rules.step_size)
+            step = self.rules.quantity_step(request.order_type)
+            candidate = quantize_down(request.qty * fraction, step)
             remainder = request.qty - candidate
-            if candidate >= self.rules.min_qty and remainder >= self.rules.step_size:
+            if candidate >= self.rules.quantity_min(request.order_type) and remainder >= step:
                 exec_qty = candidate
 
         try:
@@ -332,9 +379,8 @@ class PaperExchange(ExchangeAdapter):
                 n_queries = int(stored.get("partial_query_fills", "0"))
                 fill_qty = pending
                 if n_queries == 0:
-                    fill_qty = min(
-                        pending, quantize_down(request.qty * dec("0.3"), self.rules.step_size)
-                    )
+                    step = self.rules.quantity_step(request.order_type)
+                    fill_qty = min(pending, quantize_down(request.qty * dec("0.3"), step))
                 fills = self._settle(request, fill_qty, price)
                 stored["executed_qty"] = str(dec(stored["executed_qty"]) + fill_qty)
                 stored["cumulative_quote"] = str(dec(stored["cumulative_quote"]) + fill_qty * price)
@@ -355,6 +401,38 @@ class PaperExchange(ExchangeAdapter):
                     stored["raw_status"] = "FILLED"
                 orders[client_order_id] = stored
                 self._save_orders(orders)
+
+        # Resting STOP_LOSS_LIMIT: trigger when bid touches the stop; after
+        # triggering it becomes a limit sell that fills only while the market
+        # still trades at or above the limit price. A gap straight through
+        # the limit leaves it TRIGGERED-BUT-UNFILLED — exactly the real-world
+        # failure mode the engine's software monitor escalates on.
+        elif stored["state"] == OrderState.ACKNOWLEDGED.value and (
+            stored["request"].get("order_type") == OrderType.STOP_LOSS_LIMIT.value
+        ):
+            request = self._request_from_dict(stored["request"])
+            quote = self.get_price(symbol)
+            assert request.stop_price is not None and request.price is not None
+            if not stored.get("triggered") and quote.bid <= request.stop_price:
+                stored["triggered"] = True
+            if stored.get("triggered") and quote.bid >= request.price:
+                self._unlock_for_order(request)
+                fills = self._settle(request, request.qty, request.price)
+                stored["executed_qty"] = str(request.qty)
+                stored["cumulative_quote"] = str(request.qty * request.price)
+                stored["fills"] = [
+                    {
+                        "price": str(f.price),
+                        "qty": str(f.qty),
+                        "fee": str(f.fee),
+                        "fee_asset": f.fee_asset,
+                    }
+                    for f in fills
+                ]
+                stored["state"] = OrderState.FILLED.value
+                stored["raw_status"] = "FILLED"
+            orders[client_order_id] = stored
+            self._save_orders(orders)
 
         # Resting LIMIT orders: check if now crossed.
         elif stored["state"] == OrderState.ACKNOWLEDGED.value:
@@ -424,6 +502,7 @@ class PaperExchange(ExchangeAdapter):
             "order_type": request.order_type.value,
             "qty": str(request.qty),
             "price": str(request.price) if request.price is not None else None,
+            "stop_price": str(request.stop_price) if request.stop_price is not None else None,
             "client_order_id": request.client_order_id,
         }
 
@@ -435,6 +514,7 @@ class PaperExchange(ExchangeAdapter):
             order_type=OrderType(d["order_type"]),
             qty=dec(d["qty"]),
             price=dec(d["price"]) if d.get("price") else None,
+            stop_price=dec(d["stop_price"]) if d.get("stop_price") else None,
             client_order_id=d["client_order_id"],
         )
 

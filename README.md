@@ -43,9 +43,13 @@ Live mode is locked until *all* of: ≥30 calendar days **and** ≥300 recorded
 paper decisions, paper daily reports + a backtest report exist, the full test
 suite passed within 72h (≥100 tests, coverage + named safety tests verified),
 an interactive unlock ceremony (typed random phrase), `LIVE_TRADING_ENABLED=true`,
-and an API key with **withdrawals disabled** (verified via the exchange API).
+PostgreSQL supplied through `DATABASE_URL`, an operational external alert
+channel, and an API key with **withdrawals
+disabled** (verified via the exchange API).
 There is no automatic promotion between modes. See
 [docs/LIVE_TRADING_CHECKLIST.md](docs/LIVE_TRADING_CHECKLIST.md).
+The current release-readiness audit and remaining operator-owned blockers are
+tracked in [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
 
 ## Hard risk limits (defaults; config can only tighten them)
 
@@ -146,7 +150,7 @@ Docs index: [ARCHITECTURE](docs/ARCHITECTURE.md) ·
 [LIVE_TRADING_CHECKLIST](docs/LIVE_TRADING_CHECKLIST.md) ·
 [INCIDENT_RESPONSE](docs/INCIDENT_RESPONSE.md) ·
 [BACKTESTING](docs/BACKTESTING.md) · [STRATEGY](docs/STRATEGY.md) ·
-[API_KEY_SETUP](docs/API_KEY_SETUP.md) · [TESTING](docs/TESTING.md) ·
+[API_KEY_SETUP](docs/API_KEY_SETUP.md) · [PRODUCTION_READINESS](docs/PRODUCTION_READINESS.md) · [TESTING](docs/TESTING.md) ·
 [QUALIFICATION_EVIDENCE](docs/QUALIFICATION_EVIDENCE.md)
 
 ## Deployment

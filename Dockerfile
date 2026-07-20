@@ -13,6 +13,8 @@ RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid bot --create-home bot
 WORKDIR /app
 
 COPY requirements.txt pyproject.toml README.md ./
+# requirements.txt includes the pinned production PostgreSQL driver. Local
+# development may still use SQLite by selecting a sqlite:/// database URL.
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src ./src

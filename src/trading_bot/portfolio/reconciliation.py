@@ -75,21 +75,28 @@ class Reconciler:
         stuck = 0
         abandoned = 0
         for row in self.repos.orders.non_terminal_orders(self.cfg.mode):
+            is_protective = row["purpose"] == "protective"
             age = (now - parse_iso(row["created_at"])).total_seconds()
-            if age > self.cfg.execution.max_order_age_s:
+            if is_protective or age > self.cfg.execution.max_order_age_s:
                 try:
                     found = self.adapter.query_order(row["symbol"], row["client_order_id"])
                 except ExchangeUnavailable:
-                    stuck += 1
+                    if not is_protective:
+                        stuck += 1
                     continue
                 if found is not None:
                     self.repos.orders.update_state(row["client_order_id"], found.state, found)
                     if found.fills:
                         self.repos.orders.add_fills(row["id"], row["client_order_id"], found.fills)
                     self._apply_order_response(row, found)
-                    if found.state.value in ("ACKNOWLEDGED", "PARTIALLY_FILLED"):
+                    # A resting protective stop is SUPPOSED to sit on the book
+                    # indefinitely — it is never "stuck".
+                    if not is_protective and found.state.value in (
+                        "ACKNOWLEDGED",
+                        "PARTIALLY_FILLED",
+                    ):
                         stuck += 1
-                else:
+                elif not is_protective:
                     self.repos.orders.update_state(
                         row["client_order_id"],
                         OrderState.REJECTED,
@@ -101,6 +108,20 @@ class Reconciler:
                         row["client_order_id"],
                         row["state"],
                     )
+                else:
+                    # Protective link points at an order the exchange no longer
+                    # knows: clear it so the engine re-places the stop.
+                    self.repos.orders.update_state(
+                        row["client_order_id"],
+                        OrderState.REJECTED,
+                        note="protective stop not found on exchange; will re-place",
+                    )
+                    position = self.repos.positions.open_position(self.cfg.mode)
+                    if (
+                        position is not None
+                        and position.protective_order_id == row["client_order_id"]
+                    ):
+                        self.repos.positions.set_protective_order(position.position_id, None)
         details["stuck_orders"] = stuck
         details["abandoned_intents"] = abandoned
         if stuck:
@@ -123,6 +144,13 @@ class Reconciler:
         tolerance_qty = self.rules.step_size * 2
         tolerance_quote = self.cfg.risk.max_reconciliation_mismatch_quote
 
+        # KNOWN dust is tracked per residue in the positions table, so it is
+        # never "unexplained funds" — and only the remainder is judged.
+        dust_qty = sum(
+            (dec(r["qty"]) for r in self.repos.positions.dust_positions(self.cfg.mode)), ZERO
+        )
+        details["expected_dust_qty"] = str(dust_qty)
+
         if position is not None:
             deficit = position.qty - base_total
             details["position_qty"] = str(position.qty)
@@ -133,18 +161,19 @@ class Reconciler:
                     f"is {position.qty} — unexplained deficit"
                 )
         else:
-            # Exit orders floor quantities to the exchange step size, so a
-            # residue below minNotional is EXPECTED, unsellable dust — not a
-            # discrepancy. Anything at or above minNotional could have been
-            # sold, so holdings that large without a recorded position are
-            # genuinely unexplained.
-            surplus_value = base_total * price
+            # Holdings beyond the DB-tracked dust are judged against the
+            # exchange minimum: below it the residue is unsellable rounding
+            # residue; at or above it, it could have been sold and an
+            # unrecorded holding that large blocks trading.
+            unexplained_qty = base_total - dust_qty
+            surplus_value = unexplained_qty * price if unexplained_qty > ZERO else ZERO
             dust_threshold = max(self.rules.min_notional, tolerance_quote)
             details["base_balance"] = str(base_total)
+            details["unexplained_qty"] = str(unexplained_qty)
             details["dust_threshold_quote"] = str(dust_threshold)
             if surplus_value >= dust_threshold:
                 problems.append(
-                    f"no open position but exchange holds {base_total} "
+                    f"no open position but exchange holds {unexplained_qty} unexplained "
                     f"{self.rules.base_asset} (~{surplus_value} {self.rules.quote_asset})"
                 )
 
@@ -178,7 +207,14 @@ class Reconciler:
             return
         if row["purpose"] == "entry":
             self.portfolio.record_entry(response, dec(row["stop_price"]))
-        elif row["purpose"] == "exit":
+        elif row["purpose"] in ("exit", "protective"):
             position = self.repos.positions.open_position(self.cfg.mode)
             if position is not None:
-                self.portfolio.record_exit(position, response, "reconciliation")
+                reason = (
+                    "stop_breach_native" if row["purpose"] == "protective" else "reconciliation"
+                )
+                self.portfolio.record_exit(position, response, reason)
+                if position.protective_order_id == row["client_order_id"]:
+                    still_open = self.repos.positions.open_position(self.cfg.mode)
+                    if still_open is not None and still_open.position_id == position.position_id:
+                        self.repos.positions.set_protective_order(position.position_id, None)

@@ -60,19 +60,34 @@ barely, risking ≈0.12–0.15 USDT per trade. With 20 USDT: cap = 4 USDT < 5 �
 every entry is rejected with `MIN_NOTIONAL_EXCEEDS_RISK`. The bot reports
 this clearly and will never round an order upward to satisfy the exchange.
 
-## Protective exits — what a software stop is and is not
+## Protective exits — two layers
 
-Every entry carries a pre-computed invalidation level (default 2% below
-entry, tick-aligned). The exit monitor compares the live bid against it every
-cycle and, on breach, requests a market exit through the same
-risk-engine + gateway path.
+**Layer 1: exchange-native stop (default, `execution.use_native_stops`).**
+After every entry fill the engine places a STOP_LOSS_LIMIT sell ON the
+exchange: trigger = the invalidation level, limit =
+`protective_limit_offset_bps` (default 100) below it. The order rests on the
+book, so a dead process or dead host no longer means an unprotected
+position. The sizing check guarantees before entry that this order will be
+representable using the NET sellable quantity (gross buy − worst-case
+base-asset fee, floored to the step size) at a conservatively discounted
+stop price — otherwise the entry is rejected with
+`PROTECTIVE_EXIT_NOT_REPRESENTABLE`.
 
-**A software stop does not guarantee an execution price.** If the process is
-down, data is unavailable, or the market gaps through the level, the realised
-loss can exceed the planned distance. Mitigations: gap detection pauses
-entries; the daily-loss, 7-day and drawdown breakers cap cumulative damage;
-`hold_and_monitor` keeps the monitor running even under a kill switch.
-Residual risk remains and is accepted and documented here.
+**Layer 2: software monitor (escalation backstop).** Every cycle
+(`stop_monitor_interval_s`, default 20 s) the engine checks the live bid.
+When the stop is breached and the native stop is resting, it waits up to
+`protective_escalation_cycles` for the exchange fill; if the market gapped
+through the stop's limit price (the one case a stop-limit cannot fill) or
+patience runs out, it cancels the native stop (fill-aware: cancellation may
+reveal it already filled) and market-sells. Any other exit path cancels the
+native stop FIRST, so a double-sell is structurally impossible; a second
+concurrent exit is additionally rejected with `EXIT_ORDER_ACTIVE`.
+
+**Still no guarantees.** A stop-limit can go unfilled through a gap and a
+market escalation fills at whatever the market offers. Mitigations: gap
+detection pauses entries; the daily-loss, 7-day and drawdown breakers cap
+cumulative damage; `hold_and_monitor` keeps both layers running under a kill
+switch. Residual risk remains and is accepted and documented here.
 
 ## Consecutive-loss and cooldown behaviour
 

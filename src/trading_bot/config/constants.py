@@ -26,6 +26,19 @@ HARD_MAX_SLIPPAGE_BPS = Decimal("100")
 HARD_MAX_SPREAD_BPS = Decimal("100")
 HARD_MAX_PROTECTIVE_EXIT_BUFFER_BPS = Decimal("500")
 HARD_MAX_CLOCK_SKEW_S = 120
+# Native STOP_LOSS_LIMIT: max distance between the trigger and its limit price.
+HARD_MAX_PROTECTIVE_LIMIT_OFFSET_BPS = Decimal("500")
+
+# --------------------------------------------------------------------------
+# Exchange rate limiting (Binance spot: 6000 request weight per minute).
+# The soft threshold pauses OUR requests before the exchange starts
+# rejecting them; the hard threshold backs off firmly.
+# --------------------------------------------------------------------------
+RATE_LIMIT_WEIGHT_PER_MINUTE = 6000
+RATE_LIMIT_SOFT_RATIO = 0.75
+RATE_LIMIT_HARD_RATIO = 0.90
+RATE_LIMIT_SOFT_DELAY_S = 2.0
+RATE_LIMIT_HARD_DELAY_S = 10.0
 
 # Only spot. There is deliberately no representation of leverage, margin,
 # futures, borrowing or shorting anywhere in the type system.
@@ -77,15 +90,22 @@ REQUIRED_SAFETY_TESTS = (
     "tests/unit/test_paper_exchange.py::test_partial_fill_completes",
     "tests/unit/test_partial_fill_accounting.py::test_partial_entry_across_multiple_fills_updates_position",
     "tests/unit/test_partial_fill_accounting.py::test_partial_exit_leaves_residual_exposure_and_realizes_only_filled_qty",
+    "tests/unit/test_partial_fill_accounting.py::test_entry_accounting_rolls_back_as_one_unit",
+    "tests/unit/test_partial_fill_accounting.py::test_exit_accounting_rolls_back_as_one_unit",
+    "tests/unit/test_review_fixes.py::test_documented_unknown_execution_codes_never_become_rejections",
+    "tests/unit/test_review_fixes.py::test_market_lot_size_parsed_and_enforced",
     "tests/unit/test_redaction.py::test_secrets_never_appear_in_logs",
     "tests/security/test_endpoint_separation.py::test_testnet_adapter_refuses_live_url",
     "tests/security/test_endpoint_separation.py::test_testnet_engine_never_constructs_live_public_data_client",
     "tests/security/test_live_gate.py::test_live_locked_by_default",
+    "tests/security/test_live_gate.py::test_live_gate_requires_configured_out_of_band_alerting",
+    "tests/security/test_live_gate.py::test_live_gate_requires_postgres_database",
     "tests/security/test_live_gate.py::test_backtest_and_fixture_evidence_count_zero_paper_days",
     "tests/security/test_live_gate.py::test_tampered_qualification_evidence_is_rejected",
     "tests/security/test_quality_evidence.py::test_quality_evidence_rejects_tampered_coverage_artifact",
     "tests/integration/test_restart_reconciliation.py::test_stale_intent_abandoned_after_restart",
     "tests/integration/test_reconciliation_fail_closed.py::test_reconciliation_exception_fail_closed",
+    "tests/integration/test_engine_paths.py::test_unexpected_runtime_failure_blocks_future_entries",
     "tests/integration/test_backtest.py::test_next_candle_backtest_execution_uses_subsequent_open",
     "tests/unit/test_binance_adapter_errors.py::test_binance_2013_query_order_returns_none",
     "tests/unit/test_market_data_service_health.py::test_candle_failures_do_not_clear_on_quote_success",

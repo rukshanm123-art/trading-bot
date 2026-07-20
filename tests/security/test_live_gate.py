@@ -40,6 +40,8 @@ def test_live_locked_by_default(repos, tmp_path):
         "test_suite",
         "env_live_enabled",
         "live_credentials",
+        "out_of_band_alerting",
+        "production_database",
     } <= failed
     with pytest.raises(PermissionError, match="LIVE mode locked"):
         g.assert_live_start_allowed()
@@ -57,6 +59,45 @@ def test_no_automatic_promotion_env_alone_is_insufficient(repos, tmp_path):
     )
     with pytest.raises(PermissionError):
         g.assert_live_start_allowed()
+
+
+def test_live_gate_requires_configured_out_of_band_alerting(repos, tmp_path):
+    disabled = gate(
+        repos,
+        tmp_path,
+        secrets={"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"},
+    )
+    check = next(p for p in disabled.prerequisites() if p.name == "out_of_band_alerting")
+    assert not check.ok
+
+    cfg = make_config(notifications={"telegram": {"enabled": True}})
+    enabled = LiveGate(
+        repos,
+        cfg,
+        StaticSecretProvider({"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"}),
+        project_root=tmp_path,
+    )
+    check = next(p for p in enabled.prerequisites() if p.name == "out_of_band_alerting")
+    assert check.ok
+
+
+def test_live_gate_requires_postgres_database(repos, tmp_path):
+    sqlite_check = next(
+        p for p in gate(repos, tmp_path).prerequisites() if p.name == "production_database"
+    )
+    assert not sqlite_check.ok
+
+    cfg = make_config(db={"url": "postgresql://localhost/trading_bot"})
+    postgres_gate = LiveGate(
+        repos,
+        cfg,
+        StaticSecretProvider({}),
+        project_root=tmp_path,
+    )
+    postgres_check = next(
+        p for p in postgres_gate.prerequisites() if p.name == "production_database"
+    )
+    assert postgres_check.ok
 
 
 def _write_quality(tmp_path, **overrides):
@@ -149,24 +190,102 @@ def test_backtest_and_fixture_evidence_count_zero_paper_days(repos, tmp_path):
     assert summary.paper_decisions == 0
 
 
-def test_one_real_wall_clock_paper_day_counts_once(repos, tmp_path):
-    store = QualificationEvidenceStore(tmp_path)
+def _paper_payload(**overrides):
     payload = {
         "source_mode": "paper",
         "data_source_class": "live_market",
         "wall_clock_start": datetime(2025, 1, 1, tzinfo=UTC).isoformat(),
         "wall_clock_end": datetime(2025, 1, 1, 23, tzinfo=UTC).isoformat(),
+        "recorded_at": datetime(2025, 1, 1, 23, 1, tzinfo=UTC).isoformat(),
         "eligible_decisions": 12,
         "configuration_hash": "cfg",
         "strategy_version": "1",
         "git_commit": "deadbeef",
         "git_state": "repo",
     }
-    store.append(payload)
-    store.append({**payload, "eligible_decisions": 5})
-    summary = store.summary()
+    payload.update(overrides)
+    return payload
+
+
+def test_one_real_wall_clock_paper_day_counts_once(repos, tmp_path):
+    store = QualificationEvidenceStore(tmp_path)
+    store.append(_paper_payload())
+    store.append(
+        _paper_payload(
+            eligible_decisions=5,
+            recorded_at=datetime(2025, 1, 1, 23, 2, tzinfo=UTC).isoformat(),
+        )
+    )
+    summary = store.summary(decision_days={"2025-01-01": 20})
+    assert summary.ok, summary.failures
     assert summary.paper_days == 1
     assert summary.paper_decisions == 17
+
+
+def test_days_require_database_confirmation(repos, tmp_path):
+    """Evidence about days the operational DB never saw counts zero — the
+    fabrication path from the review: 30 fake days, no real decisions."""
+    store = QualificationEvidenceStore(tmp_path)
+    store.append(_paper_payload())
+    # no decision_days at all -> fail closed
+    assert store.summary(decision_days=None).paper_days == 0
+    # DB shows too few decisions that day -> not credited, flagged
+    summary = store.summary(decision_days={"2025-01-01": 3})
+    assert summary.paper_days == 0
+    assert any("not confirmed by database" in f for f in summary.failures)
+
+
+def test_one_second_sessions_credit_no_days(repos, tmp_path):
+    store = QualificationEvidenceStore(tmp_path)
+    store.append(
+        _paper_payload(
+            wall_clock_end=datetime(2025, 1, 1, 0, 0, 1, tzinfo=UTC).isoformat(),
+            recorded_at=datetime(2025, 1, 1, 0, 0, 2, tzinfo=UTC).isoformat(),
+        )
+    )
+    summary = store.summary(decision_days={"2025-01-01": 100})
+    assert summary.paper_days == 0  # 1s of coverage is not a paper day
+
+
+def test_backdated_evidence_rejected(repos, tmp_path):
+    store = QualificationEvidenceStore(tmp_path)
+    store.append(
+        _paper_payload(
+            recorded_at=datetime(2025, 1, 1, 12, tzinfo=UTC).isoformat(),  # before end
+        )
+    )
+    summary = store.summary(decision_days={"2025-01-01": 100})
+    assert summary.paper_days == 0
+    assert any("backdated" in f for f in summary.failures)
+
+
+def test_unsigned_evidence_rejected_when_key_established(repos, tmp_path):
+    """Once an HMAC key exists, a hand-built sha256 chain (no key) is refused."""
+    from trading_bot.security.qualification import get_or_create_evidence_key
+
+    # attacker writes a self-consistent UNSIGNED chain
+    forger = QualificationEvidenceStore(tmp_path)
+    forger.append(_paper_payload())
+    # the real verifier uses the DB-held key
+    key = get_or_create_evidence_key(repos.flags)
+    verifier = QualificationEvidenceStore(tmp_path, key=key)
+    summary = verifier.summary(decision_days={"2025-01-01": 100})
+    assert not summary.ok
+    assert summary.paper_days == 0
+
+
+def test_signed_evidence_roundtrip(repos, tmp_path):
+    from trading_bot.security.qualification import get_or_create_evidence_key
+
+    key = get_or_create_evidence_key(repos.flags)
+    assert key == get_or_create_evidence_key(repos.flags)  # stable per DB
+    store = QualificationEvidenceStore(tmp_path, key=key)
+    store.append(_paper_payload())
+    summary = QualificationEvidenceStore(tmp_path, key=key).summary(
+        decision_days={"2025-01-01": 100}
+    )
+    assert summary.ok, summary.failures
+    assert summary.paper_days == 1
 
 
 def test_tampered_qualification_evidence_is_rejected(repos, tmp_path):

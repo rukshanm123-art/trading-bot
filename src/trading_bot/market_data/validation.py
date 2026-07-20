@@ -101,6 +101,25 @@ def validate_candles(
     return ValidationResult(ok=not issues, issues=tuple(issues))
 
 
+def cross_check_quote(
+    quote: PriceQuote,
+    reference_close: Decimal,
+    max_divergence_pct: Decimal,
+) -> ValidationResult:
+    """Second-opinion sanity check: the live quote must not diverge wildly
+    from the last CLOSED candle. Candles and the book ticker are separate
+    endpoints, so one bad/poisoned feed cannot silently drive trading."""
+    if reference_close <= ZERO:
+        return ValidationResult.failure("cross-check reference close is non-positive")
+    divergence = abs((quote.mid - reference_close) / reference_close * HUNDRED)
+    if divergence > max_divergence_pct:
+        return ValidationResult.failure(
+            f"quote {quote.mid} diverges {divergence:.2f}% from last close "
+            f"{reference_close} (max {max_divergence_pct}%) — cross-check failed"
+        )
+    return ValidationResult.success()
+
+
 def validate_quote(
     quote: PriceQuote,
     symbol: str,

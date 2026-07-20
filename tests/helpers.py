@@ -141,6 +141,7 @@ def make_state(**overrides: Any) -> RiskStateSnapshot:
         "cooldown_until": None,
         "unknown_orders": 0,
         "active_entry_orders": 0,
+        "active_exit_orders": 0,
         "reconciliation_blocked": False,
         "api_errors_last_hour": 0,
     }

@@ -28,6 +28,9 @@ class Side(str, Enum):
 class OrderType(str, Enum):
     MARKET = "MARKET"
     LIMIT = "LIMIT"
+    # Exchange-native protective stop: triggers at stop_price, rests as a
+    # limit sell at limit_price. Used ONLY for protective exits.
+    STOP_LOSS_LIMIT = "STOP_LOSS_LIMIT"
 
 
 class OrderState(str, Enum):
@@ -95,6 +98,7 @@ class ReasonCode(str, Enum):
     TRADING_NOT_APPROVED = "TRADING_NOT_APPROVED"
     UNKNOWN_ORDER_PENDING = "UNKNOWN_ORDER_PENDING"
     ENTRY_ORDER_ACTIVE = "ENTRY_ORDER_ACTIVE"
+    EXIT_ORDER_ACTIVE = "EXIT_ORDER_ACTIVE"
     RECONCILIATION_MISMATCH = "RECONCILIATION_MISMATCH"
     # exchange
     EXCHANGE_UNAVAILABLE = "EXCHANGE_UNAVAILABLE"

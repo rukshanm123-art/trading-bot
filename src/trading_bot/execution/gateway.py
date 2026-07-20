@@ -72,7 +72,9 @@ class ExecutionGateway:
     def submit(
         self, order: SizedOrder, token: str | None, correlation_id: str, purpose: str
     ) -> ExecutionResult:
-        if purpose not in ("entry", "exit"):
+        # "protective" = the resting exchange-native stop guarding an open
+        # position; like exits, it is ALLOWED under an active kill switch.
+        if purpose not in ("entry", "exit", "protective"):
             raise GatewaySecurityError(f"unknown order purpose '{purpose}'")
 
         if token is None or not self.risk.verify_and_consume(order, token):
@@ -115,12 +117,17 @@ class ExecutionGateway:
         assert_transition(OrderState.RISK_APPROVED, OrderState.SUBMITTED)
         self.repos.orders.update_state(order.client_order_id, OrderState.SUBMITTED)
 
+        from trading_bot.core.enums import OrderType
+
         request = OrderRequest(
             symbol=order.symbol,
             side=order.side,
             order_type=order.order_type,
             qty=order.qty,
             price=order.limit_price,
+            # stop_price is an exchange parameter only for native stops; for
+            # entries it is the software invalidation level and stays local.
+            stop_price=order.stop_price if order.order_type == OrderType.STOP_LOSS_LIMIT else None,
             client_order_id=order.client_order_id,
         )
 

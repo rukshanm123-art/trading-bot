@@ -30,6 +30,7 @@ class RiskStateSnapshot:
     cooldown_until: datetime | None
     unknown_orders: int
     active_entry_orders: int
+    active_exit_orders: int
     reconciliation_blocked: bool
     api_errors_last_hour: int
 
@@ -46,6 +47,7 @@ class RiskStateSnapshot:
             "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else "",
             "unknown_orders": str(self.unknown_orders),
             "active_entry_orders": str(self.active_entry_orders),
+            "active_exit_orders": str(self.active_exit_orders),
             "reconciliation_blocked": str(self.reconciliation_blocked),
             "api_errors_last_hour": str(self.api_errors_last_hour),
         }
@@ -94,6 +96,7 @@ class RiskStateService:
 
         unknown = len(self.repos.orders.unknown_orders(self.mode))
         active_entries = len(self.repos.orders.active_entry_orders(self.mode))
+        active_exits = len(self.repos.orders.active_exit_orders(self.mode))
         recon_blocked = self.repos.flags.is_true(self.repos.flags.RECONCILIATION_BLOCK)
         api_errors = self.repos.events.api_errors_last_hour(now)
 
@@ -109,6 +112,7 @@ class RiskStateService:
             cooldown_until=cooldown_until,
             unknown_orders=unknown,
             active_entry_orders=active_entries,
+            active_exit_orders=active_exits,
             reconciliation_blocked=recon_blocked,
             api_errors_last_hour=api_errors,
         )

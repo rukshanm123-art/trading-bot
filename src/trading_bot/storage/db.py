@@ -33,6 +33,7 @@ class Database:
         self.url = url
         self._lock = threading.RLock()
         self._closed = False
+        self._transaction_depth = 0
         if url.startswith("sqlite:///"):
             self.backend = "sqlite"
             path = url[len("sqlite:///") :]
@@ -82,7 +83,26 @@ class Database:
             cur = self._conn.cursor()
             try:
                 cur.execute(self._adapt(sql), tuple(params))
-                self._conn.commit()
+                if self._transaction_depth == 0:
+                    self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            finally:
+                cur.close()
+
+    def execute_rowcount(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """Execute and return the affected-row count (atomic compare-and-swap
+        support: the CALLER decides success from the row count, never from a
+        separate read)."""
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                cur.execute(self._adapt(sql), tuple(params))
+                count = cur.rowcount
+                if self._transaction_depth == 0:
+                    self._conn.commit()
+                return count if count is not None else 0
             except Exception:
                 self._conn.rollback()
                 raise
@@ -100,7 +120,8 @@ class Database:
                 else:  # pragma: no cover
                     cols = [d[0] for d in cur.description or []]
                     rows = [dict(zip(cols, r, strict=False)) for r in cur.fetchall()]
-                self._conn.commit()
+                if self._transaction_depth == 0:
+                    self._conn.commit()
                 return rows
             except Exception:
                 self._conn.rollback()
@@ -118,6 +139,8 @@ class Database:
         with self._lock:
             self._ensure_open()
             cur = self._conn.cursor()
+            outermost = self._transaction_depth == 0
+            self._transaction_depth += 1
 
             class _TxCursor:
                 def __init__(self, inner: Any, adapt: Any) -> None:
@@ -129,11 +152,13 @@ class Database:
 
             try:
                 yield _TxCursor(cur, self._adapt)
-                self._conn.commit()
+                if outermost:
+                    self._conn.commit()
             except Exception:
                 self._conn.rollback()
                 raise
             finally:
+                self._transaction_depth -= 1
                 cur.close()
 
     def close(self) -> None:

@@ -128,14 +128,35 @@ class OrdersRepo:
         )
 
     def add_fills(self, order_id: str, client_order_id: str, fills: tuple[Fill, ...]) -> None:
+        """Idempotent fill persistence. Fills with a stable exchange trade id
+        dedupe on (client_order_id, trade_id); anonymous fills fall back to
+        count-prefix dedupe (exchange responses report cumulative lists)."""
+        known_ids = {
+            r["trade_id"]
+            for r in self.db.query(
+                "SELECT trade_id FROM fills WHERE client_order_id = ? AND trade_id IS NOT NULL",
+                (client_order_id,),
+            )
+            if r["trade_id"]
+        }
         existing = self.db.query_one(
-            "SELECT COUNT(*) AS n FROM fills WHERE client_order_id = ?", (client_order_id,)
+            "SELECT COUNT(*) AS n FROM fills WHERE client_order_id = ? "
+            "AND (trade_id IS NULL OR trade_id = '')",
+            (client_order_id,),
         )
-        skip = int(existing["n"]) if existing else 0
-        for f in fills[skip:]:
+        anon_seen = int(existing["n"]) if existing else 0
+        anon_index = 0
+        for f in fills:
+            if f.trade_id:
+                if f.trade_id in known_ids:
+                    continue
+            else:
+                anon_index += 1
+                if anon_index <= anon_seen:
+                    continue
             self.db.execute(
-                "INSERT INTO fills (id, order_id, client_order_id, price, qty, fee, fee_asset, ts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO fills (id, order_id, client_order_id, price, qty, fee, fee_asset, "
+                "trade_id, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     uid(),
                     order_id,
@@ -144,6 +165,7 @@ class OrdersRepo:
                     str(f.qty),
                     str(f.fee),
                     f.fee_asset,
+                    f.trade_id,
                     iso(utcnow()),
                 ),
             )
@@ -175,6 +197,37 @@ class OrdersRepo:
             f"SELECT * FROM orders WHERE mode = ? AND purpose = 'entry' "  # noqa: S608 # nosec B608 - generated placeholders only
             f"AND state NOT IN ({placeholders}) ORDER BY created_at",
             (mode.value, *terminal),
+        )
+
+    def active_exit_orders(self, mode: Mode) -> list[dict[str, Any]]:
+        terminal = tuple(s.value for s in TERMINAL_ORDER_STATES)
+        placeholders = ",".join("?" for _ in terminal)
+        return self.db.query(
+            f"SELECT * FROM orders WHERE mode = ? AND purpose = 'exit' "  # noqa: S608 # nosec B608 - generated placeholders only
+            f"AND state NOT IN ({placeholders}) ORDER BY created_at",
+            (mode.value, *terminal),
+        )
+
+    def accounted_totals(self, client_order_id: str) -> tuple[Decimal, Decimal, Decimal]:
+        """Cumulative (qty, quote, fee_quote) already booked into positions."""
+        row = self.db.query_one(
+            "SELECT qty, quote, fee_quote FROM order_accounting WHERE client_order_id = ?",
+            (client_order_id,),
+        )
+        if not row:
+            return ZERO, ZERO, ZERO
+        return dec(row["qty"]), dec(row["quote"]), dec(row["fee_quote"])
+
+    def set_accounted_totals(
+        self, client_order_id: str, qty: Decimal, quote: Decimal, fee_quote: Decimal
+    ) -> None:
+        self.db.execute(
+            "INSERT INTO order_accounting (client_order_id, qty, quote, fee_quote, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(client_order_id) DO UPDATE SET "
+            "qty = excluded.qty, quote = excluded.quote, fee_quote = excluded.fee_quote, "
+            "updated_at = excluded.updated_at",
+            (client_order_id, str(qty), str(quote), str(fee_quote), iso(utcnow())),
         )
 
     def entries_on_day(self, mode: Mode, day: str) -> int:
@@ -263,6 +316,16 @@ class DecisionsRepo:
             (mode.value, iso(start), iso(end)),
         )
 
+    def days_histogram(self, mode: Mode) -> dict[str, int]:
+        """UTC day -> decision count. Used to cross-check qualification
+        evidence against what actually happened in this database."""
+        rows = self.db.query(
+            "SELECT substr(ts, 1, 10) AS day, COUNT(*) AS n FROM decisions "
+            "WHERE mode = ? GROUP BY substr(ts, 1, 10)",
+            (mode.value,),
+        )
+        return {r["day"]: int(r["n"]) for r in rows}
+
     def last_processed_candle(self, mode: Mode, strategy: str) -> datetime | None:
         row = self.db.query_one(
             "SELECT MAX(candle_open_time) AS t FROM decisions WHERE mode = ? AND strategy = ?",
@@ -292,6 +355,7 @@ class PositionsRepo:
             opened_at=parse_iso(row["opened_at"]),
             entry_fee=dec(row["entry_fee"]),
             entry_order_id=row["entry_order_id"],
+            protective_order_id=row.get("protective_order_id"),
         )
 
     def open_by_entry_order(self, mode: Mode, entry_order_id: str) -> PositionState | None:
@@ -311,6 +375,7 @@ class PositionsRepo:
             opened_at=parse_iso(row["opened_at"]),
             entry_fee=dec(row["entry_fee"]),
             entry_order_id=row["entry_order_id"],
+            protective_order_id=row.get("protective_order_id"),
         )
 
     def insert_open(
@@ -343,6 +408,12 @@ class PositionsRepo:
             ),
         )
         return pid
+
+    def set_protective_order(self, position_id: str, client_order_id: str | None) -> None:
+        self.db.execute(
+            "UPDATE positions SET protective_order_id = ? WHERE id = ?",
+            (client_order_id, position_id),
+        )
 
     def update_stop(self, position_id: str, stop_price: Decimal) -> None:
         self.db.execute(
@@ -422,7 +493,7 @@ class PositionsRepo:
             "UPDATE positions SET status = 'closed', closed_at = ?, exit_order_id = ?, "
             "exit_fee = ?, realized_pnl = ?, exit_reason = ? WHERE id = ?",
             (
-                iso(utcnow()),
+                iso(ts or utcnow()),
                 exit_order_id,
                 str(exit_fee),
                 str(realized_pnl),
@@ -445,11 +516,16 @@ class PositionsRepo:
         realized_pnl: Decimal,
         exit_reason: str,
         ts: datetime | None = None,
-    ) -> None:
-        self.db.execute(
-            "INSERT INTO position_realizations (id, position_id, mode, symbol, exit_order_id, "
-            "qty, avg_entry_price, exit_price, entry_fee_allocated, exit_fee, realized_pnl, "
-            "exit_reason, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cum_qty_after: Decimal | None = None,
+    ) -> bool:
+        """Returns False when the DB idempotency constraint says this exact
+        realization (same exit order, same cumulative point) already exists."""
+        inserted = self.db.execute_rowcount(
+            "INSERT INTO position_realizations (id, position_id, mode, symbol, "
+            "exit_order_id, qty, avg_entry_price, exit_price, entry_fee_allocated, "
+            "exit_fee, realized_pnl, exit_reason, ts, cum_qty_after) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT DO NOTHING",
             (
                 uid(),
                 position_id,
@@ -464,8 +540,10 @@ class PositionsRepo:
                 str(realized_pnl),
                 exit_reason,
                 iso(ts or utcnow()),
+                str(cum_qty_after) if cum_qty_after is not None else None,
             ),
         )
+        return inserted == 1
 
     def realized_totals(self, position_id: str) -> tuple[Decimal, Decimal]:
         rows = self.db.query(
@@ -475,6 +553,65 @@ class PositionsRepo:
         pnl = sum((dec(r["realized_pnl"]) for r in rows), ZERO)
         fees = sum((dec(r["exit_fee"]) for r in rows), ZERO)
         return pnl, fees
+
+    def dust_positions(self, mode: Mode) -> list[dict[str, Any]]:
+        return self.db.query(
+            "SELECT * FROM positions WHERE mode = ? AND status = 'dust' ORDER BY closed_at",
+            (mode.value,),
+        )
+
+    def apply_dust_sale(
+        self,
+        position_id: str,
+        sold_qty: Decimal,
+        remaining_entry_fee: Decimal,
+        add_realized: Decimal,
+        add_exit_fee: Decimal,
+        exit_order_id: str,
+        ts: datetime,
+        exit_reason: str = "dust_sweep",
+    ) -> None:
+        """Apply one allocated dust-sweep fill without losing unsold residue."""
+        row = self.db.query_one("SELECT * FROM positions WHERE id = ?", (position_id,))
+        if not row or row["status"] != "dust":
+            raise RuntimeError(f"dust position {position_id} is unavailable")
+        current_qty = dec(row["qty"])
+        if sold_qty <= ZERO or sold_qty > current_qty:
+            raise RuntimeError(
+                f"dust sale {sold_qty} exceeds tracked residue {current_qty} for {position_id}"
+            )
+        realized = (dec(row["realized_pnl"]) if row.get("realized_pnl") else ZERO) + add_realized
+        exit_fee = (dec(row["exit_fee"]) if row.get("exit_fee") else ZERO) + add_exit_fee
+        remaining_qty = current_qty - sold_qty
+        if remaining_qty == ZERO:
+            self.db.execute(
+                "UPDATE positions SET status = 'closed', qty = '0', entry_fee = '0', "
+                "closed_at = ?, exit_order_id = ?, exit_fee = ?, realized_pnl = ?, "
+                "exit_reason = ? WHERE id = ?",
+                (
+                    iso(ts),
+                    exit_order_id,
+                    str(exit_fee),
+                    str(realized),
+                    exit_reason,
+                    position_id,
+                ),
+            )
+        else:
+            self.db.execute(
+                "UPDATE positions SET qty = ?, entry_fee = ?, exit_order_id = ?, "
+                "exit_fee = ?, realized_pnl = ?, exit_reason = ? "
+                "WHERE id = ? AND status = 'dust'",
+                (
+                    str(remaining_qty),
+                    str(remaining_entry_fee),
+                    exit_order_id,
+                    str(exit_fee),
+                    str(realized),
+                    exit_reason,
+                    position_id,
+                ),
+            )
 
     def closed_positions(self, mode: Mode, limit: int = 200) -> list[dict[str, Any]]:
         return self.db.query(

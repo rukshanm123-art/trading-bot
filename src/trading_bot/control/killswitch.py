@@ -54,9 +54,15 @@ class KillSwitch:
         raw = self.repos.flags.get(self.repos.flags.KILL_SWITCH)
         if raw:
             try:
-                data = json.loads(raw)
+                parsed = json.loads(raw)
             except json.JSONDecodeError:
-                data = {"active": raw.lower() == "true", "reason": raw}
+                parsed = None
+            # A legacy/plain value ("true") parses as a bool or a non-dict;
+            # only a dict carries structured source/reason.
+            if isinstance(parsed, dict):
+                data = parsed
+            else:
+                data = {"active": raw.strip().lower() in ("true", "1", "yes"), "reason": raw}
             if data.get("active"):
                 return True, f"{data.get('source', 'db_flag')}:{data.get('reason', '')}"
         return False, ""

@@ -55,3 +55,10 @@ LIVE_TRADING_ENABLED=true        # the separate, deliberate switch
   update env → restart → revoke old key → verify `status`.
 - The key name/label on the exchange should say what it is
   (`trading-bot live, no-withdrawal, IP-locked`).
+
+## Disable BNB fee payment
+
+Turn OFF "Use BNB to pay fees" for this account. Fees charged in a third
+asset (BNB) cannot be valued in quote terms without an extra conversion; the
+bot excludes them from P&L arithmetic and logs a warning whenever they
+appear. Paying fees in the traded pair keeps accounting exact.

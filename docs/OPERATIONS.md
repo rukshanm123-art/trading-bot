@@ -36,6 +36,11 @@ exception blocks entries before the first evaluation. TESTNET/LIVE startup
 fails closed; PAPER may keep running for diagnostics but cannot open entries
 while the block is active.
 
+An unexpected cycle exception is also treated as state uncertainty: health is
+degraded, the database/reconciliation gate blocks new entries, and an external
+critical alert is attempted. This is deliberate because an exception can occur
+after the exchange accepted an order but before local accounting completed.
+
 ## Scheduling
 
 Internal: candle-cadence evaluation, exit monitoring every cycle,
@@ -94,3 +99,14 @@ DAILY_APPROVAL mode, `approve --hours 24` is your deliberate go/no-go.
 
 Daily reports use the configured local timezone by converting local start/end
 of day to UTC query boundaries. UTC timestamps remain the storage format.
+
+## Supervised 24/7 operation
+
+- `./scripts/run_supervised.sh config/paper.yaml` — restart loop with
+  exponential backoff; a clean exit ends supervision, crashes restart it.
+- macOS: `docs/examples/com.trading-bot.paper.plist` is a launchd template
+  (survives logout; adjust WorkingDirectory, then `launchctl load`).
+- Docker: `restart: unless-stopped` in compose provides the same property.
+- With native stops enabled, a crashed process leaves the protective
+  STOP_LOSS_LIMIT resting ON the exchange; on restart, reconciliation adopts
+  whatever happened while the bot was down (including a stop that filled).

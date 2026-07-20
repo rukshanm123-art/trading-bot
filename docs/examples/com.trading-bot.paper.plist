@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd template for 24/7 supervised paper trading on macOS.
+     Install:  cp docs/examples/com.trading-bot.paper.plist ~/Library/LaunchAgents/
+               launchctl load ~/Library/LaunchAgents/com.trading-bot.paper.plist
+     Stop:     launchctl unload ~/Library/LaunchAgents/com.trading-bot.paper.plist
+     Adjust WorkingDirectory to your checkout path first. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trading-bot.paper</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/rukshandesilva/Desktop/Trading bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>scripts/run_supervised.sh</string>
+        <string>config/paper.yaml</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>var/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>var/logs/launchd.err.log</string>
+</dict>
+</plist>

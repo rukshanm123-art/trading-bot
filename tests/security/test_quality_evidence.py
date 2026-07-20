@@ -63,3 +63,11 @@ def test_quality_evidence_rejects_source_changes_after_record(tmp_path):
     assert not result.ok
     assert "configuration_schema_hash mismatch" in result.failures
     assert "source_tree_hash mismatch" in result.failures
+
+
+def test_quality_evidence_accepts_recorded_dirty_state_without_git_shelling(tmp_path):
+    path = write_quality(tmp_path, git_dirty=True)
+
+    result = verify_quality_record(tmp_path, path, require_repo=False)
+
+    assert "git dirty state mismatch" not in result.failures

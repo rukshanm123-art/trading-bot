@@ -75,6 +75,19 @@ entry price, fees and protective quantity. Exit fills realize P&L only for the
 filled quantity, allocate entry fees proportionally, preserve the remaining
 position, and mark only exchange-dust residue as explicit `dust`.
 
+**Atomic accounting.** Position, realization-ledger and cumulative
+order-accounting writes for one observed response commit as one database
+transaction. An interrupted write rolls back as a unit. Any unexpected cycle
+failure marks runtime/database state uncertain, persists the reconciliation
+block where possible and prevents new entries until health and reconciliation
+recover.
+
+**Dynamic exchange rules.** `exchangeInfo` drives LOT_SIZE,
+MARKET_LOT_SIZE, price grid, notional minimum/maximum and current one-minute
+request-weight limits. MARKET quantities are placed on a grid satisfying both
+general and market-specific filters. Documented unknown execution outcomes are
+never retried as new orders; they enter UNKNOWN and reconcile by client id.
+
 **One writer.** A DB instance lock (heartbeat row) prevents two engines from
 trading the same database; scheduled jobs run inside the single engine loop,
 so strategy evaluations cannot overlap.

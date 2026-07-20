@@ -200,6 +200,37 @@ class ExecutionConfig(StrictModel):
     limit_timeout_s: int = 60  # cancel unfilled limit entries after this
     max_order_age_s: int = 120  # any order older than this without terminal state -> reconcile
     submit_timeout_s: int = 10
+    # Exchange-native protective stops (STOP_LOSS_LIMIT resting on the
+    # exchange) so a dead process no longer means an unprotected position.
+    # The software monitor remains as the escalation backstop.
+    use_native_stops: bool = True
+    protective_limit_offset_bps: Decimal = Decimal("100")  # limit below trigger
+    protective_escalation_cycles: int = 3  # breached-but-unfilled cycles before market exit
+    stop_monitor_interval_s: int = 20  # cycle cadence in live/paper (seconds)
+
+    @field_validator("protective_limit_offset_bps", mode="before")
+    @classmethod
+    def _dec(cls, v: Any) -> Decimal:
+        return DecimalField.parse(v, "execution.protective_limit_offset_bps")
+
+    @model_validator(mode="after")
+    def _check(self) -> ExecutionConfig:
+        if self.order_type == OrderType.STOP_LOSS_LIMIT:
+            raise ValueError("execution.order_type is for ENTRIES; stops are protective-only")
+        if not (
+            Decimal("0")
+            < self.protective_limit_offset_bps
+            <= C.HARD_MAX_PROTECTIVE_LIMIT_OFFSET_BPS
+        ):
+            raise ValueError(
+                "protective_limit_offset_bps must be within "
+                f"(0, {C.HARD_MAX_PROTECTIVE_LIMIT_OFFSET_BPS}]"
+            )
+        if not (1 <= self.protective_escalation_cycles <= 20):
+            raise ValueError("protective_escalation_cycles must be within [1, 20]")
+        if not (5 <= self.stop_monitor_interval_s <= 300):
+            raise ValueError("stop_monitor_interval_s must be within [5, 300] seconds")
+        return self
 
 
 class PaperSimConfig(StrictModel):

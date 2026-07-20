@@ -59,7 +59,11 @@ class LiveGate:
         checks: list[Prerequisite] = []
         now = utcnow()
 
-        evidence = QualificationEvidenceStore(self.root).summary()
+        from trading_bot.security.qualification import get_or_create_evidence_key
+
+        evidence = QualificationEvidenceStore(
+            self.root, key=get_or_create_evidence_key(self.repos.flags)
+        ).summary(decision_days=self.repos.decisions.days_histogram(Mode.PAPER))
         paper_days = evidence.paper_days
         checks.append(
             Prerequisite(
@@ -107,6 +111,8 @@ class LiveGate:
 
         checks.append(self._quality_gate(now))
         checks.append(self._explicit_risk_config())
+        checks.append(self._production_database())
+        checks.append(self._out_of_band_alerting())
 
         enabled = (self.secrets.get(C.ENV_LIVE_ENABLED) or "").lower() == "true"
         checks.append(
@@ -196,6 +202,39 @@ class LiveGate:
             "explicit_risk_config",
             not missing,
             "risk limits explicitly configured" if not missing else f"missing keys: {missing}",
+        )
+
+    def _out_of_band_alerting(self) -> Prerequisite:
+        telegram_ok = (
+            self.cfg.notifications.telegram.enabled
+            and bool(self.secrets.get("TELEGRAM_BOT_TOKEN"))
+            and bool(self.secrets.get("TELEGRAM_CHAT_ID"))
+        )
+        email_ok = (
+            self.cfg.notifications.email.enabled
+            and bool(self.secrets.get("SMTP_HOST"))
+            and bool(self.secrets.get("SMTP_FROM"))
+            and bool(self.secrets.get("SMTP_TO"))
+        )
+        enabled = bool(telegram_ok or email_ok)
+        return Prerequisite(
+            "out_of_band_alerting",
+            enabled,
+            "external alert channel configured"
+            if enabled
+            else "enable Telegram or email and provide its required environment secrets",
+        )
+
+    def _production_database(self) -> Prerequisite:
+        is_postgres = self.cfg.db.url.startswith("postgresql://")
+        return Prerequisite(
+            "production_database",
+            is_postgres,
+            (
+                "PostgreSQL configured"
+                if is_postgres
+                else "LIVE requires PostgreSQL; set DATABASE_URL outside the repository"
+            ),
         )
 
     # ------------------------------------------------------------------

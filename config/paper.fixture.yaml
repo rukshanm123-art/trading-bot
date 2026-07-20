@@ -47,6 +47,10 @@ execution:
   limit_timeout_s: 60
   max_order_age_s: 120
   submit_timeout_s: 10
+  use_native_stops: true          # resting STOP_LOSS_LIMIT on the exchange
+  protective_limit_offset_bps: "100"  # stop-limit price below the trigger
+  protective_escalation_cycles: 3 # breached-unfilled cycles before market exit
+  stop_monitor_interval_s: 20     # cycle cadence = worst-case stop latency
 
 paper:
   starting_quote: "30"

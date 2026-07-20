@@ -31,28 +31,45 @@ class InstanceLock:
         self.acquired = False
 
     def acquire(self) -> bool:
+        """Atomic acquisition: success is decided ONLY by affected-row counts,
+        so two processes racing for a stale lock cannot both win (the loser's
+        conditional UPDATE matches zero rows)."""
         now = self.clock.now()
-        row = self.db.query_one("SELECT * FROM instance_lock WHERE name = ?", (self.name,))
-        if row is None:
-            self.db.execute(
-                "INSERT INTO instance_lock (name, instance_id, heartbeat_at) VALUES (?, ?, ?)",
+        import sqlite3
+
+        try:
+            inserted = self.db.execute_rowcount(
+                "INSERT INTO instance_lock (name, instance_id, heartbeat_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(name) DO NOTHING",
                 (self.name, self.instance_id, iso(now)),
             )
+        except sqlite3.IntegrityError:
+            inserted = 0
+        if inserted == 1:
             self.acquired = True
             return True
-        age = (now - parse_iso(row["heartbeat_at"])).total_seconds()
-        if row["instance_id"] == self.instance_id or age > STALE_AFTER_S:
-            self.db.execute(
-                "UPDATE instance_lock SET instance_id = ?, heartbeat_at = ? WHERE name = ?",
-                (self.instance_id, iso(now), self.name),
+
+        stale_cutoff = iso(now - timedelta(seconds=STALE_AFTER_S))
+        updated = self.db.execute_rowcount(
+            "UPDATE instance_lock SET instance_id = ?, heartbeat_at = ? "
+            "WHERE name = ? AND (instance_id = ? OR heartbeat_at < ?)",
+            (self.instance_id, iso(now), self.name, self.instance_id, stale_cutoff),
+        )
+        if updated == 1:
+            self.acquired = True
+            row = self.db.query_one(
+                "SELECT heartbeat_at FROM instance_lock WHERE name = ?", (self.name,)
             )
-            if age > STALE_AFTER_S:
-                log.warning("stole stale instance lock (previous heartbeat %ss ago)", int(age))
-            self.acquired = True
+            log.info("instance lock acquired (%s)", self.instance_id)
+            _ = row
             return True
+
+        row = self.db.query_one("SELECT * FROM instance_lock WHERE name = ?", (self.name,))
+        holder = row["instance_id"] if row else "unknown"
+        age = (now - parse_iso(row["heartbeat_at"])).total_seconds() if row else 0
         log.error(
             "another engine instance (%s) holds the lock (heartbeat %ss ago); refusing to start",
-            row["instance_id"],
+            holder,
             int(age),
         )
         return False

@@ -10,6 +10,22 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trading_bot_test
+          POSTGRES_USER: bot
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bot -d trading_bot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql://bot:test-only-password@127.0.0.1:5432/trading_bot_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,6 +60,9 @@ jobs:
           assert db.integrity_check()
           print("migrations OK:", applied)
           EOF
+
+      - name: PostgreSQL migration and accounting smoke
+        run: pytest tests/integration/test_postgres_backend.py -q
 
       - name: Tests (unit + integration + security + property) with quality record
         run: python scripts/record_test_run.py

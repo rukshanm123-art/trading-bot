@@ -4,4 +4,4 @@ Paper trading by default. Live trading is locked behind explicit, layered
 gates and is never enabled automatically. See README.md and docs/.
 """
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"

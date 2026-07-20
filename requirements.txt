@@ -4,3 +4,5 @@ requests==2.34.2
 pydantic==2.10.4
 PyYAML==6.0.2
 rich==13.9.4
+# Production database driver is pinned and audited with the runtime set.
+psycopg[binary]==3.2.4

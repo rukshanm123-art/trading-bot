@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from trading_bot.config.models import RiskConfig
-from trading_bot.core.enums import ReasonCode
+from trading_bot.core.enums import OrderType, ReasonCode
 from trading_bot.core.models import SymbolRules
 from trading_bot.core.types import BPS_DENOM, HUNDRED, ZERO, quantize_down
 
@@ -26,6 +26,7 @@ class SizingInputs:
     risk: RiskConfig
     stop_loss_pct: Decimal  # protective stop distance in percent
     fee_bps: Decimal  # taker fee estimate
+    order_type: OrderType = OrderType.MARKET
 
 
 @dataclass(frozen=True)
@@ -80,11 +81,17 @@ def size_entry(inputs: SizingInputs) -> SizingResult:
     qty_from_cash = spendable / (entry * fee_multiplier)
 
     qty = min(qty_from_risk, qty_from_alloc, qty_from_cash)
-    if r.step_size > ZERO:
-        qty = quantize_down(qty, r.step_size)
+    # exchange maximums: cap (never a rejection — smaller is always safe here)
+    qty = min(qty, r.quantity_max(inputs.order_type))
+    if r.max_notional > ZERO:
+        qty = min(qty, r.max_notional / entry)
+    quantity_step = r.quantity_step(inputs.order_type)
+    if quantity_step > ZERO:
+        qty = quantize_down(qty, quantity_step)
 
     # 5. Exchange minimums — reject, never round up.
-    if qty <= ZERO or qty < r.min_qty:
+    quantity_min = r.quantity_min(inputs.order_type)
+    if qty <= ZERO or qty < quantity_min:
         # Could the minimum even be afforded inside the constraints?
         return reject(ReasonCode.MIN_NOTIONAL_EXCEEDS_RISK)
     notional = qty * entry
@@ -103,15 +110,22 @@ def size_entry(inputs: SizingInputs) -> SizingResult:
         codes.append(ReasonCode.RISK_BUDGET_EXCEEDED)  # defensive; should be unreachable
 
     # 6. A new position is unsafe unless its protective exit is representable
-    #    at the stop after conservative deductions. The buffer is expressed in
-    #    bps and covers: exit trading fees, configured slippage allowance,
-    #    additional stop gap-through/evaluation margin, and the exchange's
-    #    minimum-notional behaviour. Quantity is never rounded up to pass this.
+    #    at the stop after conservative deductions. The SELLABLE quantity is
+    #    what matters: the entry commission may be charged in the base asset
+    #    (Binance BUY convention), and the net result must then round DOWN to
+    #    the exchange step — both shrink what can actually be sold at the
+    #    stop. The price side additionally discounts exit fees, slippage and
+    #    a gap-through margin. Quantity is never rounded up to pass this.
+    worst_case_base_fee = qty * inputs.fee_bps / BPS_DENOM
+    net_base_qty = qty - worst_case_base_fee
+    if r.step_size > ZERO:
+        net_base_qty = quantize_down(net_base_qty, r.step_size)
     exit_buffer_bps = inputs.fee_bps + inputs.risk.max_slippage_bps
     exit_buffer_bps += inputs.risk.protective_exit_buffer_bps
     exit_multiplier = (BPS_DENOM - exit_buffer_bps) / BPS_DENOM
-    protective_exit_notional = qty * stop_price * exit_multiplier
-    if protective_exit_notional < r.min_notional:
+    conservative_stop = stop_price * exit_multiplier
+    protective_exit_notional = net_base_qty * conservative_stop
+    if net_base_qty < r.min_qty or protective_exit_notional < r.min_notional:
         codes.append(ReasonCode.PROTECTIVE_EXIT_NOT_REPRESENTABLE)
 
     return SizingResult(
@@ -125,14 +139,20 @@ def size_entry(inputs: SizingInputs) -> SizingResult:
     )
 
 
-def size_exit_qty(position_qty: Decimal, base_free: Decimal, rules: SymbolRules) -> Decimal | None:
+def size_exit_qty(
+    position_qty: Decimal,
+    base_free: Decimal,
+    rules: SymbolRules,
+    order_type: OrderType = OrderType.MARKET,
+) -> Decimal | None:
     """Sellable quantity for closing a position: floor(min(position, balance), step).
 
     Returns None when nothing meaningful can be sold (dust below exchange minimums).
     """
     qty = min(position_qty, base_free)
-    if rules.step_size > ZERO:
-        qty = quantize_down(qty, rules.step_size)
-    if qty <= ZERO or qty < rules.min_qty:
+    step = rules.quantity_step(order_type)
+    if step > ZERO:
+        qty = quantize_down(qty, step)
+    if qty <= ZERO or qty < rules.quantity_min(order_type):
         return None
     return qty

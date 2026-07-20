@@ -9,6 +9,8 @@
 #   * `python -m trading_bot live unlock` ceremony completed (typed phrase)
 #   * LIVE_TRADING_ENABLED=true in the environment
 #   * BINANCE_LIVE_API_KEY has withdrawals DISABLED (verified via API)
+#   * Telegram or email external alerting enabled with required env secrets
+#   * DATABASE_URL selects PostgreSQL (SQLite is refused for LIVE)
 #
 # DAILY_APPROVAL is enforced: after each daily report the bot stops opening
 # positions until you run `trading-bot approve --hours 24`.
@@ -19,7 +21,9 @@ interval: 1h
 timezone: Pacific/Auckland
 
 db:
-  url: sqlite:///var/trading_bot_live.db   # use postgresql:// in production
+  # Deliberately fails the LIVE production-database gate until DATABASE_URL is
+  # supplied by the deployment environment. Never commit database credentials.
+  url: sqlite:///var/trading_bot_live.db
 
 data:
   source: exchange
@@ -59,6 +63,10 @@ execution:
   limit_timeout_s: 60
   max_order_age_s: 120
   submit_timeout_s: 10
+  use_native_stops: true          # resting STOP_LOSS_LIMIT on the exchange
+  protective_limit_offset_bps: "100"  # stop-limit price below the trigger
+  protective_escalation_cycles: 3 # breached-unfilled cycles before market exit
+  stop_monitor_interval_s: 20     # cycle cadence = worst-case stop latency
 
 paper:
   starting_quote: "30"   # unused in live; schema completeness only

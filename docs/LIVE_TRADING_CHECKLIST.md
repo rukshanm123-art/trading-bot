@@ -23,6 +23,11 @@ and no automatic promotion; the engine re-verifies gates at every startup.
       configured coverage threshold met, all named safety tests present
       (`python -m trading_bot quality run && python -m trading_bot quality verify`)
 - [ ] Risk limits explicitly present in the live config file
+- [ ] `DATABASE_URL` selects the tested PostgreSQL deployment; SQLite is
+      rejected by the LIVE gate
+- [ ] At least one external alert channel (Telegram or email) is enabled and
+      has all required environment secrets; console-only alerting is rejected
+      by the live gate
 
 ## Stage 2 — behavioural evidence from the paper month
 
@@ -55,6 +60,7 @@ and no automatic promotion; the engine re-verifies gates at every startup.
       IP allowlisted to the bot host
 - [ ] Key set as `BINANCE_LIVE_*` (never in files); old keys revoked
 - [ ] `live status` shows every prerequisite PASS
+- [ ] Send a real test notification and verify it arrives on a separate device
 
 ## Stage 5 — unlock ceremony
 
@@ -72,3 +78,7 @@ and no automatic promotion; the engine re-verifies gates at every startup.
 - [ ] Manually verify every order against the exchange UI for the first week
 - [ ] Any anomaly → `trading-bot stop` first, investigate second
       (docs/INCIDENT_RESPONSE.md)
+
+The checklist is an operator process, not a promise that the software is
+profitable or risk-free. See `docs/PRODUCTION_READINESS.md` for the current
+code audit and explicit NO-GO conditions.

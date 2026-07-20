@@ -58,52 +58,66 @@ class GateContext:
     extras: dict[str, str] = field(default_factory=dict)
 
 
+RISK_TOKEN_TTL_S = 120.0
+
+
 class RiskEngine:
     def __init__(self, cfg: AppConfig, fee_bps: Decimal) -> None:
         self.cfg = cfg
         self.fee_bps = fee_bps
         self._hmac_key = os.urandom(32)
         self._consumed: set[str] = set()
-        self._issued: set[str] = set()
+        self._issued: dict[str, float] = {}  # token -> expiry (time.time())
         self._lock = threading.Lock()
+        from trading_bot.config.loader import config_hash
+
+        self._cfg_hash = config_hash(cfg)
 
     # ------------------------------------------------------------ tokens
+    def _token_material(self, order: SizedOrder) -> bytes:
+        """Canonical serialization of the COMPLETE approved proposal.
+
+        Every field of the sized order (including stop price, estimated
+        notional/fees and risk amount), plus the mode and the configuration
+        hash, is under the HMAC — mutating ANY approved value after
+        evaluation invalidates the token."""
+        from trading_bot.core.types import json_dumps
+
+        canonical = json_dumps(
+            {
+                "order": order.as_dict(),
+                "mode": self.cfg.mode.value,
+                "config_hash": self._cfg_hash,
+            }
+        )
+        return canonical.encode("utf-8")
+
     def _token_for(self, order: SizedOrder) -> str:
-        material = "|".join(
-            [
-                order.client_order_id,
-                order.symbol,
-                order.side.value,
-                order.order_type.value,
-                str(order.qty),
-                str(order.limit_price or ""),
-            ]
-        ).encode()
-        digest = hmac.new(self._hmac_key, material, hashlib.sha256).hexdigest()
+        import time
+
+        digest = hmac.new(self._hmac_key, self._token_material(order), hashlib.sha256).hexdigest()
         with self._lock:
-            self._issued.add(digest)
+            self._issued[digest] = time.time() + RISK_TOKEN_TTL_S
         return digest
 
     def verify_and_consume(self, order: SizedOrder, token: str) -> bool:
-        material = "|".join(
-            [
-                order.client_order_id,
-                order.symbol,
-                order.side.value,
-                order.order_type.value,
-                str(order.qty),
-                str(order.limit_price or ""),
-            ]
-        ).encode()
-        expected = hmac.new(self._hmac_key, material, hashlib.sha256).hexdigest()
+        import time
+
+        expected = hmac.new(self._hmac_key, self._token_material(order), hashlib.sha256).hexdigest()
         with self._lock:
             if token in self._consumed:
                 log.error("approval token replay attempt for %s", order.client_order_id)
                 return False
-            if token not in self._issued or not hmac.compare_digest(expected, token):
+            expiry = self._issued.get(token)
+            if expiry is None or not hmac.compare_digest(expected, token):
                 log.error("invalid approval token for %s", order.client_order_id)
                 return False
+            if time.time() > expiry:
+                log.error("expired approval token for %s", order.client_order_id)
+                del self._issued[token]
+                return False
             self._consumed.add(token)
+            del self._issued[token]
             return True
 
     # ------------------------------------------------------ entry checks
@@ -202,6 +216,7 @@ class RiskEngine:
                 risk=r,
                 stop_loss_pct=self.cfg.strategy.params.stop_loss_pct,
                 fee_bps=self.fee_bps,
+                order_type=self.cfg.execution.order_type,
             )
         )
         inputs["sizing_stop"] = str(sizing.stop_price)
@@ -227,6 +242,82 @@ class RiskEngine:
         )
         return RiskDecision(True, (ReasonCode.OK,), order, self._token_for(order), inputs)
 
+    # ------------------------------------------------------- dust sweep
+    def evaluate_dust_sweep(
+        self, dust_qty: Decimal, quote: PriceQuote, rules: SymbolRules, base_free: Decimal
+    ) -> RiskDecision:
+        """Approve an aggregate market sell of accumulated exchange dust.
+        Only meaningful once the combined residue clears exchange minimums."""
+        from trading_bot.core.types import quantize_down
+
+        inputs = {"purpose": "dust_sweep", "dust_qty": str(dust_qty)}
+        qty = min(dust_qty, base_free)
+        step = rules.quantity_step(OrderType.MARKET)
+        if step > ZERO:
+            qty = quantize_down(qty, step)
+        if qty <= ZERO or qty < rules.quantity_min(OrderType.MARKET):
+            return RiskDecision(False, (ReasonCode.QTY_BELOW_MIN,), None, None, inputs)
+        notional = qty * quote.bid
+        if notional < rules.min_notional:
+            return RiskDecision(False, (ReasonCode.MIN_NOTIONAL_EXCEEDS_RISK,), None, None, inputs)
+        order = SizedOrder(
+            symbol=rules.symbol,
+            side=Side.SELL,
+            order_type=OrderType.MARKET,
+            qty=qty,
+            limit_price=None,
+            stop_price=ZERO,
+            est_entry_price=quote.bid,
+            est_notional=notional,
+            est_fee=notional * self.fee_bps / Decimal(10000),
+            risk_amount=ZERO,
+            client_order_id=new_client_order_id("ds"),
+        )
+        return RiskDecision(True, (ReasonCode.OK,), order, self._token_for(order), inputs)
+
+    # ------------------------------------------------- protective stops
+    def evaluate_protective_stop(
+        self, position: PositionState, rules: SymbolRules, base_free: Decimal
+    ) -> RiskDecision:
+        """Size and approve the exchange-native STOP_LOSS_LIMIT that protects
+        an open position. Trigger = the position's invalidation level; the
+        limit rests protective_limit_offset_bps below it so ordinary
+        stop-throughs still fill. Sizing already guaranteed the exit stays
+        representable; this re-checks against the ACTUAL filled quantity."""
+        from trading_bot.core.types import BPS_DENOM, quantize_down
+
+        inputs = {"purpose": "protective_stop", "position_id": position.position_id}
+        qty = size_exit_qty(position.qty, base_free, rules, OrderType.STOP_LOSS_LIMIT)
+        if qty is None:
+            return RiskDecision(False, (ReasonCode.QTY_BELOW_MIN,), None, None, inputs)
+        trigger = position.stop_price
+        offset = self.cfg.execution.protective_limit_offset_bps
+        limit = trigger * (BPS_DENOM - offset) / BPS_DENOM
+        if rules.tick_size > ZERO:
+            limit = quantize_down(limit, rules.tick_size)
+        if trigger <= ZERO or limit <= ZERO or limit >= trigger:
+            return RiskDecision(False, (ReasonCode.NO_VALID_STOP,), None, None, inputs)
+        if qty * limit < rules.min_notional:
+            return RiskDecision(
+                False, (ReasonCode.PROTECTIVE_EXIT_NOT_REPRESENTABLE,), None, None, inputs
+            )
+        order = SizedOrder(
+            symbol=rules.symbol,
+            side=Side.SELL,
+            order_type=OrderType.STOP_LOSS_LIMIT,
+            qty=qty,
+            limit_price=limit,
+            stop_price=trigger,
+            est_entry_price=limit,
+            est_notional=qty * limit,
+            est_fee=qty * limit * self.fee_bps / Decimal(10000),
+            risk_amount=ZERO,
+            client_order_id=new_client_order_id("ps"),
+        )
+        inputs["trigger"] = str(trigger)
+        inputs["limit"] = str(limit)
+        return RiskDecision(True, (ReasonCode.OK,), order, self._token_for(order), inputs)
+
     # ------------------------------------------------------- exit checks
     def evaluate_exit(self, ctx: GateContext, reason: str) -> RiskDecision:
         """Exits are deliberately permissive: closing risk is usually safer than
@@ -236,6 +327,13 @@ class RiskEngine:
             return RiskDecision(False, (ReasonCode.DATA_VALIDATION_FAILED,), None, None, inputs)
         if ctx.quote is None:
             return RiskDecision(False, (ReasonCode.STALE_MARKET_DATA,), None, None, inputs)
+        if ctx.state.active_exit_orders > 0:
+            # A prior exit is still submitted/acknowledged/partially filled:
+            # a second concurrent sell risks double-selling the position.
+            # Reconcile or cancel the existing order first.
+            return RiskDecision(False, (ReasonCode.EXIT_ORDER_ACTIVE,), None, None, inputs)
+        if ctx.state.unknown_orders > 0:
+            return RiskDecision(False, (ReasonCode.UNKNOWN_ORDER_PENDING,), None, None, inputs)
 
         qty = size_exit_qty(ctx.open_position.qty, ctx.base_free, ctx.rules)
         if qty is None:
