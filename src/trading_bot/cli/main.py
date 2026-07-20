@@ -294,7 +294,16 @@ def cmd_report(args) -> int:
 def cmd_live(args) -> int:
     cfg, db, repos = _load(args)
     secrets = EnvSecretProvider()
-    gate = LiveGate(repos, cfg, secrets, config_path=args.config)
+    from trading_bot.notifications.adapters import build_notification_hub
+
+    hub = build_notification_hub(cfg, secrets)
+    gate = LiveGate(
+        repos,
+        cfg,
+        secrets,
+        config_path=args.config,
+        external_alert_probe=hub.verify_external_connectivity,
+    )
 
     if args.live_cmd == "status":
         print("live-mode prerequisites:")

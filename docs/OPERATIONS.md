@@ -29,9 +29,10 @@ every startup).
 ### Startup sequence (every start, all modes)
 
 1. migrations → 2. config validation vs hard caps → 3. mode/endpoint/
-credential checks (+ key permission check in live) → 4. instance lock →
-5. reconciliation (balances, open orders, stale intents, partial fills) →
-6. only then the trading loop. A reconciliation mismatch or reconciliation
+credential checks (+ key permission check in live) → 4. LIVE PostgreSQL and
+read-only external-alert connectivity checks → 5. instance lock →
+6. reconciliation (balances, open orders, stale intents, partial fills) →
+7. only then the trading loop. A reconciliation mismatch or reconciliation
 exception blocks entries before the first evaluation. TESTNET/LIVE startup
 fails closed; PAPER may keep running for diagnostics but cannot open entries
 while the block is active.
@@ -59,6 +60,10 @@ is optional — e.g. nightly `scripts/backup_db.sh`.
   (equity, drawdown, cycles, decisions, entries/exits, errors).
 - Alerts (console/email/telegram): risk-limit events, kill switch,
   reconciliation mismatch, exit failures, consecutive-loss pause.
+- LIVE configuration must enable email or Telegram. Before unlock/startup, the
+  gate performs a read-only SMTP or Telegram-chat connectivity probe; a failed
+  probe refuses LIVE. A separately received test alert remains an operator
+  checklist requirement because connectivity alone cannot prove delivery.
 
 ## Backup & restore
 

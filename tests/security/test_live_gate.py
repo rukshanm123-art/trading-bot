@@ -76,12 +76,13 @@ def test_live_gate_requires_configured_out_of_band_alerting(repos, tmp_path):
         cfg,
         StaticSecretProvider({"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"}),
         project_root=tmp_path,
+        external_alert_probe=lambda: {"telegram": True},
     )
     check = next(p for p in enabled.prerequisites() if p.name == "out_of_band_alerting")
     assert check.ok
 
 
-def test_live_gate_requires_postgres_database(repos, tmp_path):
+def test_live_gate_requires_postgres_database(repos, tmp_path, monkeypatch):
     sqlite_check = next(
         p for p in gate(repos, tmp_path).prerequisites() if p.name == "production_database"
     )
@@ -94,10 +95,23 @@ def test_live_gate_requires_postgres_database(repos, tmp_path):
         StaticSecretProvider({}),
         project_root=tmp_path,
     )
-    postgres_check = next(
-        p for p in postgres_gate.prerequisites() if p.name == "production_database"
-    )
+    monkeypatch.setattr(repos.db, "backend", "postgres")
+    postgres_check = postgres_gate._production_database()
     assert postgres_check.ok
+
+
+def test_live_gate_rejects_failed_external_connectivity(repos, tmp_path):
+    cfg = make_config(notifications={"telegram": {"enabled": True}})
+    failed = LiveGate(
+        repos,
+        cfg,
+        StaticSecretProvider({"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"}),
+        project_root=tmp_path,
+        external_alert_probe=lambda: {"telegram": False},
+    )
+    check = next(p for p in failed.prerequisites() if p.name == "out_of_band_alerting")
+    assert not check.ok
+    assert "connectivity" in check.detail
 
 
 def _write_quality(tmp_path, **overrides):

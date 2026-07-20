@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import requests
 
+from tests.helpers import make_config
 from trading_bot.core.enums import ComponentHealth
 from trading_bot.monitoring.health import HEALTH
 from trading_bot.monitoring.metrics import METRICS
@@ -29,6 +30,7 @@ def test_console_notifier_logs_and_metrics_get_returns_values(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     assert ConsoleNotifier().send("subject", "body", "critical") is True
+    assert ConsoleNotifier().verify_connectivity() is True
     assert "NOTIFY [CRITICAL] subject" in caplog.text
 
     METRICS.inc("unit_counter", 3)
@@ -42,6 +44,7 @@ def test_telegram_notifier_requires_configured_secrets() -> None:
     notifier = TelegramNotifier(StaticSecretProvider({}))
 
     assert notifier.send("subject", "body") is False
+    assert notifier.verify_connectivity() is False
 
 
 def test_telegram_notifier_success_and_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,9 +74,23 @@ def test_telegram_notifier_success_and_transport_failure(monkeypatch: pytest.Mon
     monkeypatch.setattr("trading_bot.notifications.adapters.requests.post", failing_post)
     assert notifier.send("subject", "body") is False
 
+    class ProbeResp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        "trading_bot.notifications.adapters.requests.get", lambda *args, **kwargs: ProbeResp()
+    )
+    assert notifier.verify_connectivity() is True
+
 
 def test_email_notifier_success_missing_config_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert EmailNotifier(StaticSecretProvider({})).send("subject", "body") is False
+    missing = EmailNotifier(StaticSecretProvider({}))
+    assert missing.send("subject", "body") is False
+    assert missing.verify_connectivity() is False
 
     events: list[tuple[str, Any]] = []
 
@@ -90,11 +107,18 @@ def test_email_notifier_success_missing_config_and_failure(monkeypatch: pytest.M
         def starttls(self):
             events.append(("starttls",))
 
+        def ehlo(self):
+            events.append(("ehlo",))
+
         def login(self, username, password):
             events.append(("login", username, password))
 
         def sendmail(self, sender, recipients, msg):
             events.append(("sendmail", sender, recipients, msg))
+
+        def noop(self):
+            events.append(("noop",))
+            return 250, b"OK"
 
     monkeypatch.setattr("trading_bot.notifications.adapters.smtplib.SMTP", SMTP)
     notifier = EmailNotifier(
@@ -111,6 +135,7 @@ def test_email_notifier_success_missing_config_and_failure(monkeypatch: pytest.M
     )
 
     assert notifier.send("subject", "body", "warning") is True
+    assert notifier.verify_connectivity() is True
     assert ("starttls",) in events
     assert any(event[0] == "sendmail" for event in events)
 
@@ -139,6 +164,42 @@ def test_notification_hub_records_broken_adapter_as_false() -> None:
         "broken": False,
         "working": True,
     }
+
+
+def test_notification_hub_requires_verified_external_connectivity() -> None:
+    class External(Notifier):
+        name = "external"
+
+        def send(self, subject: str, body: str, severity: str = "info") -> bool:
+            return True
+
+        def verify_connectivity(self) -> bool:
+            return True
+
+    class BrokenConnectivity(External):
+        name = "broken-connectivity"
+
+        def verify_connectivity(self) -> bool:
+            raise RuntimeError("probe failed")
+
+    assert NotificationHub(
+        [ConsoleNotifier(), External(), BrokenConnectivity()]
+    ).verify_external_connectivity() == {"external": True, "broken-connectivity": False}
+
+    cfg = make_config(
+        notifications={
+            "console": True,
+            "telegram": {"enabled": True},
+            "email": {"enabled": True},
+        }
+    )
+    from trading_bot.notifications.adapters import build_notification_hub
+
+    names = [
+        notifier.name
+        for notifier in build_notification_hub(cfg, StaticSecretProvider({})).notifiers
+    ]
+    assert names == ["console", "telegram", "email"]
 
 
 def _request(

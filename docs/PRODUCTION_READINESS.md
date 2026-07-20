@@ -12,8 +12,8 @@ profitability claim, or authorization to trade. LIVE remains locked by default.
 - Persist-before-submit order intents, unique client order ids and UNKNOWN
   outcome reconciliation. Binance `-1000`, `-1006` and `-1007` order outcomes
   fail closed instead of becoming retryable rejections.
-- Atomic entry, exit and dust accounting; cumulative partial fills and replay
-  idempotency; explicit tracked dust.
+- Atomic raw-fill, entry, exit and dust accounting; cumulative partial fills,
+  replay idempotency and explicit tracked dust.
 - Exchange-native protective stop-limit orders with software escalation, plus
   conservative stop-level minimum-notional qualification before entry.
 - Dynamic LOT_SIZE and MARKET_LOT_SIZE grids, notional bounds, account fee
@@ -22,9 +22,13 @@ profitability claim, or authorization to trade. LIVE remains locked by default.
 - Startup and periodic reconciliation, one-writer lock, deterministic risk
   caps, kill switches, circuit breaker, health/metrics and hash-chained audit.
 - LIVE gate requiring qualification evidence, clean/fresh quality evidence,
-  explicit risk config, PostgreSQL, external alerts, credentials, environment
-  opt-in and an interactive unlock ceremony. Key permissions are checked at
-  startup and withdrawals-enabled keys are refused.
+  explicit risk config, PostgreSQL, externally reachable alerts, credentials,
+  environment opt-in and an interactive unlock ceremony. PostgreSQL and an
+  enabled external channel are also enforced while parsing LIVE config; actual
+  database type and read-only alert connectivity are rechecked at startup.
+  Key permissions are checked and withdrawals-enabled keys are refused.
+- CI starts PostgreSQL 16 and tests migrations, transaction rollback, fill/P&L
+  idempotency, partial-exit accounting and cross-connection instance locking.
 
 The exchange integration is aligned with the current official Binance Spot
 [general REST contract](https://developers.binance.com/en/docs/products/spot/rest-api),

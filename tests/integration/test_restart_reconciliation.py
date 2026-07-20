@@ -165,8 +165,9 @@ def test_unknown_order_blocks_until_resolved(repos):
     assert len(repos.orders.unknown_orders(Mode.PAPER)) == 1
 
     # reconcile: paper exchange has no such order -> REJECTED, block cleared
-    unresolved = gateway_flaky.resolve_unknown_orders()
+    unresolved, recovered = gateway_flaky.resolve_unknown_orders()
     assert unresolved == 0
+    assert recovered == ()
     assert not repos.flags.is_true(repos.flags.UNKNOWN_ORDER_BLOCK)
     row = repos.orders.get_by_client_id(order.client_order_id)
     assert row["state"] == OrderState.REJECTED.value

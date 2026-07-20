@@ -17,6 +17,7 @@ import hashlib
 import json
 import subprocess  # nosec - dev tooling, fixed argv, no shell
 import sys
+import time
 import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +32,8 @@ QUALITY_DIR = ROOT / "var" / "quality"
 JUNIT = QUALITY_DIR / "junit.xml"
 COV_JSON = QUALITY_DIR / "coverage.json"
 BIN_DIRS = [Path(sys.executable).parent, Path(sys.prefix) / "bin", ROOT / ".venv" / "bin"]
+QUALITY_DEADLINE_S = 13 * 60
+_deadline: float | None = None
 
 
 def tool(name: str) -> str:
@@ -41,8 +44,38 @@ def tool(name: str) -> str:
     return name
 
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)  # nosec
+def _as_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def run(cmd: list[str], timeout_s: float = 60) -> subprocess.CompletedProcess:
+    """Run one quality phase with both per-command and whole-run deadlines."""
+    remaining = timeout_s
+    if _deadline is not None:
+        remaining = min(timeout_s, _deadline - time.monotonic())
+    if remaining <= 0:
+        return subprocess.CompletedProcess(
+            cmd, 124, "", f"quality deadline exceeded before: {' '.join(cmd)}\n"
+        )
+    print(f"quality phase: {' '.join(cmd)} (timeout {remaining:.0f}s)", flush=True)
+    try:
+        return subprocess.run(  # nosec - fixed argv, no shell
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=remaining,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            _as_text(exc.stdout),
+            _as_text(exc.stderr) + f"quality phase timed out after {remaining:.0f}s\n",
+        )
 
 
 def collect_test_ids() -> list[str]:
@@ -66,6 +99,8 @@ def git_info() -> tuple[str | None, bool, str]:
 
 
 def main() -> int:
+    global _deadline
+    _deadline = time.monotonic() + QUALITY_DEADLINE_S
     QUALITY_DIR.mkdir(parents=True, exist_ok=True)
 
     collected_ids = collect_test_ids()
@@ -91,7 +126,8 @@ def main() -> int:
             "--cov=src/trading_bot",
             f"--cov-report=json:{COV_JSON}",
             "--cov-report=term",
-        ]
+        ],
+        timeout_s=8 * 60,
     )
     sys.stdout.write(proc.stdout[-3000:])
     sys.stderr.write(proc.stderr[-2000:])
@@ -143,10 +179,10 @@ def main() -> int:
         "git_state": git_state,
         "python": sys.version.split()[0],
         "tool_versions": {
-            "pytest": run([sys.executable, "-m", "pytest", "--version"]).stdout.strip(),
-            "ruff": run([tool("ruff"), "--version"]).stdout.strip(),
-            "mypy": run([tool("mypy"), "--version"]).stdout.strip(),
-            "bandit": run([tool("bandit"), "--version"]).stdout.strip().splitlines()[0],
+            "pytest": run([sys.executable, "-m", "pytest", "--version"], 10).stdout.strip(),
+            "ruff": run([tool("ruff"), "--version"], 10).stdout.strip(),
+            "mypy": run([tool("mypy"), "--version"], 10).stdout.strip(),
+            "bandit": run([tool("bandit"), "--version"], 10).stdout.strip().splitlines()[0],
         },
         "ran_at": datetime.now(UTC).isoformat(),
     }

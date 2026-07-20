@@ -18,6 +18,7 @@ from trading_bot.core.types import dec
 from trading_bot.exchange.errors import ExchangeUnavailable, OrderRejectedError
 from trading_bot.exchange.interface import FrozenClock
 from trading_bot.execution.gateway import ExecutionGateway, GatewaySecurityError
+from trading_bot.portfolio.accounting import PortfolioService
 from trading_bot.risk.engine import RiskEngine
 from trading_bot.storage.audit import AuditLog
 
@@ -187,11 +188,26 @@ def test_gateway_submission_rejection_and_unavailable_paths(repos) -> None:
     assert result.state == OrderState.REJECTED
 
 
-def test_await_completion_records_additional_fills(repos) -> None:
+def test_gateway_defers_executed_state_until_atomic_accounting(repos) -> None:
+    gateway, risk, _clock = _gateway(repos, FakeAdapter())
+    order = _order("tb-en-gateway000000000010")
+
+    result = gateway.submit(order, risk._token_for(order), "cid", "entry")
+
+    assert result.response is not None
+    assert (
+        repos.orders.get_by_client_id(order.client_order_id)["state"] == OrderState.SUBMITTED.value
+    )
+    PortfolioService(repos, Mode.PAPER, RULES).record_entry(result.response, order.stop_price)
+    assert repos.orders.get_by_client_id(order.client_order_id)["state"] == OrderState.FILLED.value
+    assert repos.positions.open_position(Mode.PAPER) is not None
+
+
+def test_await_completion_defers_fills_to_atomic_accounting(repos) -> None:
     adapter = FakeAdapter()
     gateway, risk, _clock = _gateway(repos, adapter)
     order = _order("tb-en-gateway000000000005")
-    row_id = repos.orders.insert_intent(order, Mode.PAPER, "cid", "entry")
+    repos.orders.insert_intent(order, Mode.PAPER, "cid", "entry")
     first_fill = Fill(dec("100"), dec("0.02"), dec("0.00002"), "BTC")
     later_fill = Fill(dec("101"), dec("0.04"), dec("0.00004"), "BTC")
     first = _response(
@@ -202,7 +218,6 @@ def test_await_completion_records_additional_fills(repos) -> None:
         fills=(first_fill,),
     )
     repos.orders.update_state(order.client_order_id, OrderState.PARTIALLY_FILLED, first)
-    repos.orders.add_fills(row_id, order.client_order_id, first.fills)
     adapter.queries = [
         _response(
             order.client_order_id,
@@ -216,10 +231,10 @@ def test_await_completion_records_additional_fills(repos) -> None:
     final = gateway.await_completion(first, max_queries=2)
 
     assert final.state == OrderState.FILLED
-    fills = repos.db.query(
-        "SELECT * FROM fills WHERE client_order_id = ?", (order.client_order_id,)
+    assert (
+        repos.db.query("SELECT * FROM fills WHERE client_order_id = ?", (order.client_order_id,))
+        == []
     )
-    assert [row["qty"] for row in fills] == ["0.02", "0.04"]
 
 
 def test_resolve_unknown_orders_handles_unavailable_found_and_not_found(repos) -> None:
@@ -238,13 +253,12 @@ def test_resolve_unknown_orders_handles_unavailable_found_and_not_found(repos) -
         None,
     ]
 
-    unresolved = gateway.resolve_unknown_orders()
+    unresolved, recovered = gateway.resolve_unknown_orders()
 
     assert unresolved == 2
-    assert (
-        repos.orders.get_by_client_id(found.client_order_id)["state"]
-        == OrderState.PARTIALLY_FILLED.value
-    )
+    assert len(recovered) == 1
+    assert recovered[0].response.client_order_id == found.client_order_id
+    assert repos.orders.get_by_client_id(found.client_order_id)["state"] == OrderState.UNKNOWN.value
     assert (
         repos.orders.get_by_client_id(missing.client_order_id)["state"] == OrderState.REJECTED.value
     )
@@ -280,11 +294,25 @@ def test_stale_partial_entry_cancel_queries_first_and_preserves_fills(repos) -> 
     assert row_id
     clock.advance(1_000)
 
-    assert gateway.cancel_stale_entry_orders(max_age_s=1) == 1
+    cancelled, recovered = gateway.cancel_stale_entry_orders(max_age_s=1)
+    assert cancelled == 1
+    assert len(recovered) == 1
 
     row = repos.orders.get_by_client_id(order.client_order_id)
-    assert row["state"] == OrderState.CANCELLED.value
+    assert row["state"] == OrderState.ACKNOWLEDGED.value
+    assert (
+        repos.db.query("SELECT * FROM fills WHERE client_order_id = ?", (order.client_order_id,))
+        == []
+    )
+
+    from trading_bot.portfolio.accounting import PortfolioService
+
+    PortfolioService(repos, Mode.PAPER, RULES).record_entry(recovered[0].response, order.stop_price)
     fills = repos.db.query(
         "SELECT * FROM fills WHERE client_order_id = ?", (order.client_order_id,)
     )
     assert len(fills) == 1
+    assert (
+        repos.orders.get_by_client_id(order.client_order_id)["state"] == OrderState.CANCELLED.value
+    )
+    assert repos.positions.open_position(Mode.PAPER) is not None

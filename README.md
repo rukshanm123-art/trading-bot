@@ -44,7 +44,7 @@ paper decisions, paper daily reports + a backtest report exist, the full test
 suite passed within 72h (≥100 tests, coverage + named safety tests verified),
 an interactive unlock ceremony (typed random phrase), `LIVE_TRADING_ENABLED=true`,
 PostgreSQL supplied through `DATABASE_URL`, an operational external alert
-channel, and an API key with **withdrawals
+channel whose read-only connectivity probe succeeds, and an API key with **withdrawals
 disabled** (verified via the exchange API).
 There is no automatic promotion between modes. See
 [docs/LIVE_TRADING_CHECKLIST.md](docs/LIVE_TRADING_CHECKLIST.md).

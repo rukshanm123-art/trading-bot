@@ -21,9 +21,9 @@ interval: 1h
 timezone: Pacific/Auckland
 
 db:
-  # Deliberately fails the LIVE production-database gate until DATABASE_URL is
-  # supplied by the deployment environment. Never commit database credentials.
-  url: sqlite:///var/trading_bot_live.db
+  # Credential-free placeholder so configuration is structurally LIVE-safe.
+  # Supply the real connection through DATABASE_URL; never commit credentials.
+  url: postgresql://localhost/trading_bot
 
 data:
   source: exchange
@@ -85,7 +85,9 @@ continuation:
 notifications:
   console: true
   email: { enabled: false }     # enable + set SMTP_* env for production
-  telegram: { enabled: false }  # enable + set TELEGRAM_* env for production
+  # Enabled structurally, but LIVE stays locked until TELEGRAM_* credentials
+  # exist and the read-only connectivity probe succeeds.
+  telegram: { enabled: true }
 
 monitoring:
   enabled: true

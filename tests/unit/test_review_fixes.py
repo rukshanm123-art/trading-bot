@@ -382,6 +382,34 @@ def test_used_weight_tracker_delays(monkeypatch):
     tracker.update_from_headers({"x-mbx-used-weight-1m": "garbage"})  # ignored
 
 
+@pytest.mark.parametrize("status", [418, 429])
+def test_binance_transport_headers_enforce_retry_after(status, monkeypatch):
+    import trading_bot.exchange.binance as binance
+    import trading_bot.exchange.ratelimit as ratelimit
+
+    clock = {"now": 100.0}
+    delays: list[float] = []
+    tracker = ratelimit.UsedWeightTracker(limit_per_minute=1000)
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(binance, "RATE_TRACKER", tracker)
+
+    def sleep(seconds):
+        delays.append(seconds)
+        clock["now"] += seconds
+
+    monkeypatch.setattr(binance.time, "sleep", sleep)
+    responses = iter(
+        [
+            (status, {"code": -1003}, {"Retry-After": "7"}),
+            (200, {"bidPrice": "99", "askPrice": "101"}, {}),
+        ]
+    )
+
+    public = binance.BinancePublicData(transport=lambda *args: next(responses))
+    assert public.get_price("BTCUSDT").bid == dec("99")
+    assert delays and delays[0] >= 7
+
+
 # ------------------------------------------------------------ cross-check
 def test_cross_check_quote_divergence():
     from trading_bot.market_data.validation import cross_check_quote

@@ -34,6 +34,7 @@ class Database:
         self._lock = threading.RLock()
         self._closed = False
         self._transaction_depth = 0
+        self._conn: Any
         if url.startswith("sqlite:///"):
             self.backend = "sqlite"
             path = url[len("sqlite:///") :]

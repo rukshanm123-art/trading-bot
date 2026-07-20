@@ -150,3 +150,15 @@ def test_unexpected_runtime_failure_blocks_future_entries(tmp_path):
     assert not engine._db_ok
     assert engine.repos.flags.get(engine.repos.flags.RECONCILIATION_BLOCK) == "true"
     engine.db.close()
+
+
+def test_live_startup_independently_refuses_non_postgres_database():
+    from types import SimpleNamespace
+
+    from trading_bot.engine.trader import TradingEngine
+
+    engine = TradingEngine.__new__(TradingEngine)
+    engine.cfg = SimpleNamespace(mode=Mode.LIVE)
+    engine.db = SimpleNamespace(backend="sqlite")
+    with pytest.raises(RuntimeError, match="active PostgreSQL"):
+        engine.startup_checks()

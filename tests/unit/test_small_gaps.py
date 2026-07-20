@@ -137,3 +137,20 @@ def test_db_rollback_on_error(tmp_path):
     rows = db.query("SELECT COUNT(*) AS n FROM t")
     assert rows[0]["n"] == 1
     db.close()
+
+
+def test_quality_runner_converts_timeout_to_failure(monkeypatch):
+    import runpy
+    import subprocess
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "record_test_run.py"
+    namespace = runpy.run_path(str(script), run_name="quality_runner_test")
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 1), output="partial")
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    result = namespace["run"](["stuck-command"], timeout_s=1)
+    assert result.returncode == 124
+    assert "timed out" in result.stderr

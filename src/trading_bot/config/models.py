@@ -367,6 +367,13 @@ class AppConfig(StrictModel):
                     "live mode defaults to DAILY_APPROVAL; to use AUTO_CONTINUE you must set "
                     "continuation.acknowledge_auto_continue_risk: true (not recommended)"
                 )
+            if not self.db.url.startswith("postgresql://"):
+                raise ValueError("live mode requires PostgreSQL via db.url or DATABASE_URL")
+            if not (self.notifications.email.enabled or self.notifications.telegram.enabled):
+                raise ValueError(
+                    "live mode requires at least one external notification channel "
+                    "(email or Telegram)"
+                )
         if self.mode != Mode.PAPER and self.data.source == "fixture":
             raise ValueError("fixture data source is only allowed in paper mode")
         return self

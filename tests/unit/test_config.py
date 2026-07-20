@@ -51,9 +51,35 @@ def test_live_requires_daily_approval_unless_acknowledged():
         make_config(mode="live", continuation={"mode": "auto_continue"})
     cfg = make_config(
         mode="live",
+        db={"url": "postgresql://localhost/trading_bot"},
+        notifications={"telegram": {"enabled": True}},
         continuation={"mode": "auto_continue", "acknowledge_auto_continue_risk": True},
     )
     assert cfg.mode.value == "live"
+
+
+def test_live_configuration_requires_postgres_and_external_alerts():
+    with pytest.raises(Exception, match="PostgreSQL"):
+        make_config(mode="live", continuation={"mode": "daily_approval"})
+    with pytest.raises(Exception, match="external notification"):
+        make_config(
+            mode="live",
+            db={"url": "postgresql://localhost/trading_bot"},
+            continuation={"mode": "daily_approval"},
+        )
+
+
+def test_locked_live_config_is_structurally_safe_and_sqlite_override_is_rejected():
+    from pathlib import Path
+
+    live_path = Path(__file__).resolve().parents[2] / "config" / "live.locked.yaml"
+    cfg = load_config(live_path, env={})
+    assert cfg.mode.value == "live"
+    assert cfg.db.url.startswith("postgresql://")
+    assert cfg.notifications.telegram.enabled
+
+    with pytest.raises(ConfigError, match="PostgreSQL"):
+        load_config(live_path, env={"DATABASE_URL": "sqlite:///unsafe-live.db"})
 
 
 def test_fixture_source_paper_only():

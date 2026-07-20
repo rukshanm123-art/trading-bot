@@ -26,6 +26,10 @@ class Notifier(ABC):
     @abstractmethod
     def send(self, subject: str, body: str, severity: str = "info") -> bool: ...
 
+    def verify_connectivity(self) -> bool:
+        """Read-only credential/connectivity probe used by the LIVE gate."""
+        return False
+
 
 class ConsoleNotifier(Notifier):
     name = "console"
@@ -33,6 +37,9 @@ class ConsoleNotifier(Notifier):
     def send(self, subject: str, body: str, severity: str = "info") -> bool:
         level = logging.CRITICAL if severity == "critical" else logging.INFO
         log.log(level, "NOTIFY [%s] %s\n%s", severity.upper(), subject, body)
+        return True
+
+    def verify_connectivity(self) -> bool:
         return True
 
 
@@ -61,6 +68,25 @@ class TelegramNotifier(Notifier):
             return resp.status_code == 200
         except requests.RequestException as exc:
             log.error("telegram send failed: %s", type(exc).__name__)
+            return False
+
+    def verify_connectivity(self) -> bool:
+        """Verify the bot token can access the configured chat without sending."""
+        token = self._secrets.get("TELEGRAM_BOT_TOKEN")
+        chat_id = self._secrets.get("TELEGRAM_CHAT_ID")
+        if not token or not chat_id:
+            return False
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getChat",
+                params={"chat_id": chat_id},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return False
+            payload = resp.json()
+            return isinstance(payload, dict) and payload.get("ok") is True
+        except (requests.RequestException, ValueError):
             return False
 
 
@@ -97,6 +123,34 @@ class EmailNotifier(Notifier):
             log.error("email send failed: %s", type(exc).__name__)
             return False
 
+    def verify_connectivity(self) -> bool:
+        """Verify SMTP connection, TLS and optional authentication without mail."""
+        host = self._secrets.get("SMTP_HOST")
+        sender = self._secrets.get("SMTP_FROM")
+        recipient = self._secrets.get("SMTP_TO")
+        if not host or not sender or not recipient:
+            return False
+        try:
+            port = int(self._secrets.get("SMTP_PORT") or "587")
+        except ValueError:
+            return False
+        username = self._secrets.get("SMTP_USERNAME")
+        password = self._secrets.get("SMTP_PASSWORD")
+        if bool(username) != bool(password):
+            return False
+        try:
+            with smtplib.SMTP(host, port, timeout=15) as smtp:
+                smtp.ehlo()
+                if self._use_tls:
+                    smtp.starttls()
+                    smtp.ehlo()
+                if username and password:
+                    smtp.login(username, password)
+                code, _message = smtp.noop()
+            return 200 <= int(code) < 300
+        except (smtplib.SMTPException, OSError, ValueError):
+            return False
+
 
 class NotificationHub:
     def __init__(self, notifiers: list[Notifier]) -> None:
@@ -111,3 +165,24 @@ class NotificationHub:
                 log.error("notifier %s raised %s", n.name, type(exc).__name__)
                 results[n.name] = False
         return results
+
+    def verify_external_connectivity(self) -> dict[str, bool]:
+        results: dict[str, bool] = {}
+        for notifier in self.notifiers:
+            if isinstance(notifier, ConsoleNotifier):
+                continue
+            try:
+                results[notifier.name] = notifier.verify_connectivity()
+            except Exception:
+                results[notifier.name] = False
+        return results
+
+
+def build_notification_hub(cfg, secrets: SecretProvider) -> NotificationHub:
+    """Build the configured hub consistently for runtime and unlock checks."""
+    notifiers: list[Notifier] = [ConsoleNotifier()] if cfg.notifications.console else []
+    if cfg.notifications.telegram.enabled:
+        notifiers.append(TelegramNotifier(secrets))
+    if cfg.notifications.email.enabled:
+        notifiers.append(EmailNotifier(secrets, cfg.notifications.email.use_tls))
+    return NotificationHub(notifiers)

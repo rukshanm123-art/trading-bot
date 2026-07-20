@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from trading_bot.core.enums import Mode, OrderState, Side
 from trading_bot.core.models import ExecutionResult, OrderRequest, OrderResponse, SizedOrder
+from trading_bot.core.types import ZERO
 from trading_bot.exchange.errors import (
     ExchangeUnavailable,
     OrderRejectedError,
@@ -35,6 +38,18 @@ log = logging.getLogger(__name__)
 
 class GatewaySecurityError(RuntimeError):
     """An order tried to bypass risk approval or mode separation."""
+
+
+@dataclass(frozen=True)
+class RecoveredExecution:
+    """An exchange response recovered outside the synchronous submit path.
+
+    The caller must pass this to portfolio reconciliation so fill persistence
+    and derived accounting commit together.
+    """
+
+    order_row: dict[str, Any]
+    response: OrderResponse
 
 
 class ExecutionGateway:
@@ -175,9 +190,14 @@ class ExecutionGateway:
 
     # ------------------------------------------------------------------
     def _record_response(self, order_row_id: str, response: OrderResponse) -> None:
+        # Executed responses and their raw fills are deliberately NOT written
+        # here. PortfolioService persists the response, fills and derived
+        # accounting in one transaction. Until then the non-terminal DB state
+        # makes a crash discoverable by reconciliation.
+        _ = order_row_id
+        if response.executed_qty > ZERO:
+            return
         self.repos.orders.update_state(response.client_order_id, response.state, response)
-        if response.fills:
-            self.repos.orders.add_fills(order_row_id, response.client_order_id, response.fills)
 
     def await_completion(self, response: OrderResponse, max_queries: int = 5) -> OrderResponse:
         """Poll partially-filled/acknowledged orders to a terminal state."""
@@ -202,10 +222,12 @@ class ExecutionGateway:
             current = updated
         return current
 
-    def resolve_unknown_orders(self) -> int:
+    def resolve_unknown_orders(self) -> tuple[int, tuple[RecoveredExecution, ...]]:
         """Query every UNKNOWN order by client id. Clears the entry block when
-        all are resolved. Returns number still unresolved."""
+        all are resolved. Returns unresolved count and responses that require
+        atomic portfolio accounting."""
         unresolved = 0
+        recovered: list[RecoveredExecution] = []
         for row in self.repos.orders.unknown_orders(self.mode):
             client_id = row["client_order_id"]
             try:
@@ -220,19 +242,24 @@ class ExecutionGateway:
             else:
                 assert_transition(OrderState(row["state"]), found.state)
                 self._record_response(row["id"], found)
+                if found.executed_qty > 0:
+                    recovered.append(RecoveredExecution(row, found))
                 self.audit.append(
                     "reconcile.order_resolved",
                     {"client_order_id": client_id, "state": found.state.value},
                 )
                 if found.state in (OrderState.ACKNOWLEDGED, OrderState.PARTIALLY_FILLED):
                     unresolved += 1
-        if unresolved == 0:
+        if unresolved == 0 and not recovered:
             self.repos.flags.set(self.repos.flags.UNKNOWN_ORDER_BLOCK, "false")
-        return unresolved
+        return unresolved, tuple(recovered)
 
-    def cancel_stale_entry_orders(self, max_age_s: int) -> int:
-        """Cancel resting entry orders older than max_age_s. Returns count."""
+    def cancel_stale_entry_orders(
+        self, max_age_s: int
+    ) -> tuple[int, tuple[RecoveredExecution, ...]]:
+        """Cancel stale entries and return executions requiring accounting."""
         cancelled = 0
+        recovered: list[RecoveredExecution] = []
         now = self.clock.now()
         for row in self.repos.orders.non_terminal_orders(self.mode):
             if row["purpose"] != "entry" or row["side"] != Side.BUY.value:
@@ -260,6 +287,8 @@ class ExecutionGateway:
                         OrderState.CANCELLED,
                         OrderState.REJECTED,
                     ):
+                        if latest.executed_qty > 0:
+                            recovered.append(RecoveredExecution(row, latest))
                         continue
                 try:
                     resp = self.adapter.cancel_order(row["symbol"], row["client_order_id"])
@@ -267,8 +296,10 @@ class ExecutionGateway:
                     log.warning("cancel of %s failed: %s", row["client_order_id"], exc)
                     continue
                 self._record_response(row["id"], resp)
+                if resp.executed_qty > 0:
+                    recovered.append(RecoveredExecution(row, resp))
                 self.audit.append(
                     "gateway.stale_cancel", {"client_order_id": row["client_order_id"]}
                 )
                 cancelled += 1
-        return cancelled
+        return cancelled, tuple(recovered)

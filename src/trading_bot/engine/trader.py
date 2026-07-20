@@ -68,13 +68,7 @@ from trading_bot.market_data.validation import cross_check_quote, validate_candl
 from trading_bot.monitoring.health import HEALTH
 from trading_bot.monitoring.metrics import METRICS
 from trading_bot.monitoring.server import MonitoringServer
-from trading_bot.notifications.adapters import (
-    ConsoleNotifier,
-    EmailNotifier,
-    NotificationHub,
-    Notifier,
-    TelegramNotifier,
-)
+from trading_bot.notifications.adapters import ConsoleNotifier, build_notification_hub
 from trading_bot.portfolio.accounting import PortfolioService
 from trading_bot.portfolio.reconciliation import Reconciler
 from trading_bot.reporting.daily import DailyReportBuilder
@@ -231,16 +225,18 @@ class TradingEngine:
             self.adapter, self.repos, cfg, self.rules, self.gateway, self.clock, self.portfolio
         )
 
-        notifiers: list[Notifier] = [ConsoleNotifier()] if cfg.notifications.console else []
-        if cfg.notifications.telegram.enabled:
-            notifiers.append(TelegramNotifier(self.secrets))
-        if cfg.notifications.email.enabled:
-            notifiers.append(EmailNotifier(self.secrets, cfg.notifications.email.use_tls))
-        self.hub = NotificationHub(notifiers)
+        self.hub = build_notification_hub(cfg, self.secrets)
         self.reports = DailyReportBuilder(self.repos, cfg, self.rules, self.clock, self.hub)
         self.analyst = TemplateAnalyst()
 
-        self.live_gate = LiveGate(self.repos, cfg, self.secrets, config_path, self.root)
+        self.live_gate = LiveGate(
+            self.repos,
+            cfg,
+            self.secrets,
+            config_path,
+            self.root,
+            external_alert_probe=self.hub.verify_external_connectivity,
+        )
         self.lock = InstanceLock(self.db, self.clock)
         self.monitor: MonitoringServer | None = None
 
@@ -273,6 +269,8 @@ class TradingEngine:
     def startup_checks(self) -> None:
         mode = self.cfg.mode
         if mode == Mode.LIVE:
+            if self.db.backend != "postgres":
+                raise RuntimeError("LIVE startup requires an active PostgreSQL database")
             log.critical(
                 "\n" + "=" * 70 + "\n  LIVE TRADING MODE — REAL FUNDS AT RISK"
                 "\n  Symbol %s | risk/trade %s%% | daily stop %s%% | drawdown stop %s%%"
@@ -291,7 +289,6 @@ class TradingEngine:
             self.adapter.sync_clock()
             self.adapter.verify_key_permissions()
             self._apply_account_fee()
-            self._warn_if_console_only_alerts()
         elif mode == Mode.TESTNET:
             if not isinstance(self.adapter, BinanceAdapter):
                 raise RuntimeError("TESTNET mode requires a signed Binance adapter")
@@ -577,7 +574,11 @@ class TradingEngine:
 
         # ---- housekeeping -------------------------------------------------
         if self.cfg.execution.limit_timeout_s > 0:
-            self.gateway.cancel_stale_entry_orders(self.cfg.execution.limit_timeout_s)
+            _cancelled, recovered = self.gateway.cancel_stale_entry_orders(
+                self.cfg.execution.limit_timeout_s
+            )
+            for item in recovered:
+                self.reconciler.apply_order_response(item.order_row, item.response)
         try:
             self._maybe_sweep_dust(quote if qval.ok else None, cid)
         except Exception:
@@ -652,7 +653,7 @@ class TradingEngine:
         if execution.response is None:
             return
         final = self.gateway.await_completion(execution.response)
-        if final.state in (OrderState.FILLED, OrderState.PARTIALLY_FILLED):
+        if final.executed_qty > ZERO:
             proceeds = self.portfolio.record_dust_sweep(dust_rows, final)
             METRICS.inc("bot_dust_sweeps_total")
             log.info("dust sweep recovered %s %s", proceeds, self.rules.quote_asset)
@@ -743,7 +744,7 @@ class TradingEngine:
                 )
                 if execution.response is not None:
                     final = self.gateway.await_completion(execution.response)
-                    if final.state in (OrderState.FILLED, OrderState.PARTIALLY_FILLED):
+                    if final.executed_qty > ZERO:
                         self.portfolio.record_entry(final, risk_decision.order.stop_price)
                         METRICS.inc("bot_entries_total")
         elif signal.action == SignalAction.EXIT_LONG and position is not None:
@@ -809,10 +810,8 @@ class TradingEngine:
             log.warning("native stop %s vanished from the exchange; will re-place", coid)
             self.repos.positions.set_protective_order(position.position_id, None)
             return self.portfolio.open_position()
-        if row is not None and row["state"] != resp.state.value:
+        if row is not None and row["state"] != resp.state.value and resp.executed_qty <= ZERO:
             self.repos.orders.update_state(coid, resp.state, resp)
-            if resp.fills and resp.state == OrderState.FILLED:
-                self.repos.orders.add_fills(row["id"], coid, resp.fills)
         if resp.state == OrderState.FILLED and resp.executed_qty > ZERO:
             log.warning(
                 "exchange-native stop FILLED: %s sold %s @ ~%s",
@@ -820,17 +819,17 @@ class TradingEngine:
                 resp.executed_qty,
                 resp.avg_fill_price,
             )
-            self.repos.positions.set_protective_order(position.position_id, None)
             realized = self.portfolio.record_exit(position, resp, "stop_breach_native")
             METRICS.inc("bot_exits_total")
             METRICS.inc("bot_native_stop_fills_total")
             self._post_exit_bookkeeping(realized)
             return self.portfolio.open_position()
         if resp.state in (OrderState.CANCELLED, OrderState.REJECTED):
-            self.repos.positions.set_protective_order(position.position_id, None)
             if resp.executed_qty > ZERO:
                 realized = self.portfolio.record_exit(position, resp, "stop_breach_native")
                 self._post_exit_bookkeeping(realized)
+            else:
+                self.repos.positions.set_protective_order(position.position_id, None)
             return self.portfolio.open_position()
         # PARTIALLY_FILLED stops finalize via escalation/cancel (cumulative
         # fills are only booked once, from a terminal response).
@@ -882,19 +881,17 @@ class TradingEngine:
                 return False
         except ExchangeUnavailable:
             return False
-        self.repos.positions.set_protective_order(position.position_id, None)
         if resp is None:
             return False
-        if row is not None and row["state"] != resp.state.value:
+        if row is not None and row["state"] != resp.state.value and resp.executed_qty <= ZERO:
             self.repos.orders.update_state(coid, resp.state, resp)
-            if resp.fills:
-                self.repos.orders.add_fills(row["id"], coid, resp.fills)
         if resp.executed_qty > ZERO:
             realized = self.portfolio.record_exit(position, resp, "stop_breach_native")
             METRICS.inc("bot_exits_total")
             METRICS.inc("bot_native_stop_fills_total")
             self._post_exit_bookkeeping(realized)
             return True
+        self.repos.positions.set_protective_order(position.position_id, None)
         return False
 
     def _ensure_protective(self, position: PositionState, cid: str) -> None:
@@ -1053,7 +1050,7 @@ class TradingEngine:
             self.repos.events.alert("critical", "exit_failed", msg, delivered)
             return
         final = self.gateway.await_completion(execution.response)
-        if final.state in (OrderState.FILLED, OrderState.PARTIALLY_FILLED):
+        if final.executed_qty > ZERO:
             realized = self.portfolio.record_exit(position, final, reason)
             METRICS.inc("bot_exits_total")
             self._post_exit_bookkeeping(realized)

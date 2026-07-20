@@ -27,7 +27,9 @@ and no automatic promotion; the engine re-verifies gates at every startup.
       rejected by the LIVE gate
 - [ ] At least one external alert channel (Telegram or email) is enabled and
       has all required environment secrets; console-only alerting is rejected
-      by the live gate
+      by configuration validation and the live gate
+- [ ] The read-only external-channel connectivity probe passes, then a real
+      critical test notification is received on a separate device
 
 ## Stage 2 — behavioural evidence from the paper month
 

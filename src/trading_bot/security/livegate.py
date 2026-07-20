@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets as sysrand
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -47,12 +48,14 @@ class LiveGate:
         secret_provider: SecretProvider,
         config_path: str | None = None,
         project_root: str | Path = ".",
+        external_alert_probe: Callable[[], dict[str, bool]] | None = None,
     ) -> None:
         self.repos = repos
         self.cfg = cfg
         self.secrets = secret_provider
         self.config_path = config_path
         self.root = Path(project_root)
+        self.external_alert_probe = external_alert_probe
 
     # ------------------------------------------------------------------
     def prerequisites(self) -> list[Prerequisite]:
@@ -216,17 +219,36 @@ class LiveGate:
             and bool(self.secrets.get("SMTP_FROM"))
             and bool(self.secrets.get("SMTP_TO"))
         )
-        enabled = bool(telegram_ok or email_ok)
+        configured = bool(telegram_ok or email_ok)
+        if not configured:
+            return Prerequisite(
+                "out_of_band_alerting",
+                False,
+                "enable Telegram or email and provide its required environment secrets",
+            )
+        if self.external_alert_probe is None:
+            return Prerequisite(
+                "out_of_band_alerting",
+                False,
+                "external alert credentials present but connectivity was not verified",
+            )
+        try:
+            results = self.external_alert_probe()
+        except Exception:
+            results = {}
+        reachable = any(results.values())
         return Prerequisite(
             "out_of_band_alerting",
-            enabled,
-            "external alert channel configured"
-            if enabled
-            else "enable Telegram or email and provide its required environment secrets",
+            reachable,
+            "external alert connectivity verified"
+            if reachable
+            else "configured external alert channel failed its connectivity probe",
         )
 
     def _production_database(self) -> Prerequisite:
-        is_postgres = self.cfg.db.url.startswith("postgresql://")
+        is_postgres = (
+            self.cfg.db.url.startswith("postgresql://") and self.repos.db.backend == "postgres"
+        )
         return Prerequisite(
             "production_database",
             is_postgres,

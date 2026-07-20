@@ -16,7 +16,7 @@ import hashlib
 import hmac
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -50,8 +50,11 @@ from trading_bot.security.secrets import SecretProvider
 
 log = logging.getLogger(__name__)
 
-# transport(method, url, headers, params, timeout_s) -> (status_code, parsed_json)
-Transport = Callable[[str, str, dict[str, str], dict[str, Any], float], tuple[int, Any]]
+# Custom transports may use the legacy two-tuple. The production transport
+# returns response headers as the third item so rate-limit instructions cannot
+# be lost between HTTP and retry policy.
+TransportResult = tuple[int, Any] | tuple[int, Any, Mapping[str, str]]
+Transport = Callable[[str, str, dict[str, str], dict[str, Any], float], TransportResult]
 
 _STATUS_MAP: dict[str, OrderState] = {
     "NEW": OrderState.ACKNOWLEDGED,
@@ -104,7 +107,7 @@ def validate_endpoint(environment: EndpointEnvironment, base_url: str | None = N
 
 def _requests_transport(
     method: str, url: str, headers: dict[str, str], params: dict[str, Any], timeout_s: float
-) -> tuple[int, Any]:
+) -> tuple[int, Any, Mapping[str, str]]:
     resp = requests.request(
         method,
         url,
@@ -113,19 +116,33 @@ def _requests_transport(
         data=params if method != "GET" else None,
         timeout=timeout_s,
     )
-    RATE_TRACKER.update_from_headers(resp.headers)
     try:
         body = resp.json()
     except ValueError:
         body = {"raw": resp.text[:200]}
-    return resp.status_code, body
+    return resp.status_code, body, dict(resp.headers)
+
+
+def _unpack_transport_result(result: TransportResult) -> tuple[int, Any, Mapping[str, str]]:
+    if len(result) == 2:
+        status, body = result
+        return status, body, {}
+    status, body, headers = result
+    return status, body, headers
+
+
+def _retry_delay(attempt: int, status: int) -> float:
+    backoff = min(C.RETRY_BACKOFF_BASE_S * (2**attempt), C.RETRY_BACKOFF_MAX_S)
+    if status in (418, 429):
+        return max(backoff, RATE_TRACKER.suggested_delay())
+    return backoff
 
 
 def _respect_rate_limit() -> None:
     delay = RATE_TRACKER.suggested_delay()
     if delay > 0:
         log.warning(
-            "approaching exchange weight limit (used %s/min); pausing %.1fs",
+            "exchange rate-limit backoff (used %s/min); pausing %.1fs",
             RATE_TRACKER.used_weight(),
             delay,
         )
@@ -226,7 +243,9 @@ class BinancePublicData:
         for attempt in range(C.MAX_RETRIES):
             _respect_rate_limit()
             try:
-                status, body = self._transport("GET", url, {}, params or {}, C.HTTP_TIMEOUT_S)
+                result = self._transport("GET", url, {}, params or {}, C.HTTP_TIMEOUT_S)
+                status, body, response_headers = _unpack_transport_result(result)
+                RATE_TRACKER.update_from_headers(response_headers)
             except requests.RequestException as exc:
                 last_error = type(exc).__name__
                 status, body = 0, None
@@ -234,7 +253,7 @@ class BinancePublicData:
                 return body
             last_error = f"http_{status}"
             if status in (418, 429) or status >= 500 or status == 0:
-                time.sleep(min(C.RETRY_BACKOFF_BASE_S * (2**attempt), C.RETRY_BACKOFF_MAX_S))
+                time.sleep(_retry_delay(attempt, status))
                 continue
             break
         if self._on_api_error:
@@ -360,7 +379,9 @@ class BinanceAdapter(ExchangeAdapter):
                 # is tiny and certainty beats throttling there
                 _respect_rate_limit()
             try:
-                status, body = self._transport(method, url, headers, params, C.HTTP_TIMEOUT_S)
+                result = self._transport(method, url, headers, params, C.HTTP_TIMEOUT_S)
+                status, body, response_headers = _unpack_transport_result(result)
+                RATE_TRACKER.update_from_headers(response_headers)
             except requests.RequestException as exc:
                 if is_order:
                     # The order may or may not have reached the exchange.
@@ -369,7 +390,7 @@ class BinanceAdapter(ExchangeAdapter):
                         f"({type(exc).__name__}); state unknown — reconcile before retrying"
                     ) from exc
                 last_error = type(exc).__name__
-                time.sleep(min(C.RETRY_BACKOFF_BASE_S * (2**attempt), C.RETRY_BACKOFF_MAX_S))
+                time.sleep(_retry_delay(attempt, 0))
                 continue
             if status == 200:
                 return body
@@ -393,7 +414,7 @@ class BinanceAdapter(ExchangeAdapter):
                         f"{method} {path}: {last_error} on order submission; "
                         "state unknown — reconcile before retrying"
                     )
-                time.sleep(min(C.RETRY_BACKOFF_BASE_S * (2**attempt), C.RETRY_BACKOFF_MAX_S))
+                time.sleep(_retry_delay(attempt, status))
                 continue
             if is_order:
                 # ANY status not definitively classified above may still mean

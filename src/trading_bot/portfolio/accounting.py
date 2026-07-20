@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
-from trading_bot.core.enums import Mode
+from trading_bot.core.enums import TERMINAL_ORDER_STATES, Mode
 from trading_bot.core.models import AssetBalance, OrderResponse, PositionState, SymbolRules
 from trading_bot.core.types import BPS_DENOM, ZERO
 from trading_bot.storage.repositories import Repositories
@@ -54,6 +54,26 @@ class PortfolioService:
     # ------------------------------------------------------------------
     def open_position(self) -> PositionState | None:
         return self.repos.positions.open_position(self.mode)
+
+    def _persist_response(self, response: OrderResponse) -> None:
+        """Persist the response and raw fills inside the accounting transaction.
+
+        Production and testnet responses must always have a persist-before-submit
+        order intent. Direct PAPER accounting tests may omit that intent; their
+        client order id is used as the non-FK fill grouping id in that case.
+        """
+        row = self.repos.orders.get_by_client_id(response.client_order_id)
+        if row is None and self.mode != Mode.PAPER:
+            raise RuntimeError(
+                f"order intent {response.client_order_id} missing before fill accounting; "
+                "reconciliation required"
+            )
+        if row is not None:
+            self.repos.orders.update_state(response.client_order_id, response.state, response)
+        if not response.fills:
+            return
+        order_id = row["id"] if row is not None else response.client_order_id
+        self.repos.orders.add_fills(order_id, response.client_order_id, response.fills)
 
     def _warn_third_asset_fees(self, response: OrderResponse) -> None:
         third = response.third_asset_fees
@@ -102,6 +122,7 @@ class PortfolioService:
         Idempotent: reprocessing a response with no new quantity is a no-op."""
         if response.executed_qty <= ZERO:
             return None
+        self._persist_response(response)
         existing = self.repos.positions.open_by_entry_order(self.mode, response.client_order_id)
         acc_qty, _, _ = self.repos.orders.accounted_totals(response.client_order_id)
         if response.executed_qty <= acc_qty:
@@ -164,6 +185,7 @@ class PortfolioService:
         executed = response.executed_qty
         if executed <= ZERO:
             return ZERO
+        self._persist_response(response)
         coid = response.client_order_id
         acc_qty, acc_quote, acc_fee = self.repos.orders.accounted_totals(coid)
         delta_qty = executed - acc_qty
@@ -255,6 +277,8 @@ class PortfolioService:
                     cumulative_exit_fee,
                     cumulative_pnl,
                 )
+            if response.state in TERMINAL_ORDER_STATES and position.protective_order_id == coid:
+                self.repos.positions.set_protective_order(position.position_id, None)
         log.info(
             "position exit applied (%s): sold %s @ ~%s, realized pnl %s, remaining %s",
             reason,
@@ -282,6 +306,7 @@ class PortfolioService:
         executed = response.executed_qty
         if executed <= ZERO or not dust_rows:
             return ZERO
+        self._persist_response(response)
         coid = response.client_order_id
         acc_qty, acc_quote, acc_fee = self.repos.orders.accounted_totals(coid)
         if executed <= acc_qty:

@@ -87,6 +87,7 @@ def test_entry_accounting_rolls_back_as_one_unit(repos, monkeypatch):
 
     assert repos.positions.open_position(Mode.PAPER) is None
     assert repos.orders.accounted_totals("entry-atomic") == (dec("0"), dec("0"), dec("0"))
+    assert repos.db.query("SELECT * FROM fills WHERE client_order_id = ?", ("entry-atomic",)) == []
 
 
 def test_partial_exit_leaves_residual_exposure_and_realizes_only_filled_qty(repos):
@@ -169,6 +170,7 @@ def test_exit_accounting_rolls_back_as_one_unit(repos, monkeypatch):
         == []
     )
     assert repos.orders.accounted_totals("exit-atomic") == (dec("0"), dec("0"), dec("0"))
+    assert repos.db.query("SELECT * FROM fills WHERE client_order_id = ?", ("exit-atomic",)) == []
 
 
 def test_later_partial_exit_completion_closes_with_total_pnl(repos):

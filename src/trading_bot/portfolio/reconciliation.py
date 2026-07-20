@@ -58,7 +58,11 @@ class Reconciler:
 
         # 1. Resolve any UNKNOWN orders first (by client order id).
         try:
-            unresolved = self.gateway.resolve_unknown_orders()
+            unresolved, recovered = self.gateway.resolve_unknown_orders()
+            for item in recovered:
+                self.apply_order_response(item.order_row, item.response)
+            if unresolved == 0:
+                self.repos.flags.set(self.repos.flags.UNKNOWN_ORDER_BLOCK, "false")
         except ExchangeUnavailable as exc:
             problems.append(f"cannot resolve unknown orders: {exc}")
             unresolved = -1
@@ -86,9 +90,7 @@ class Reconciler:
                     continue
                 if found is not None:
                     self.repos.orders.update_state(row["client_order_id"], found.state, found)
-                    if found.fills:
-                        self.repos.orders.add_fills(row["id"], row["client_order_id"], found.fills)
-                    self._apply_order_response(row, found)
+                    self.apply_order_response(row, found)
                     # A resting protective stop is SUPPOSED to sit on the book
                     # indefinitely — it is never "stuck".
                     if not is_protective and found.state.value in (
@@ -202,7 +204,8 @@ class Reconciler:
         self._record(result)
         return result
 
-    def _apply_order_response(self, row: dict[str, Any], response) -> None:
+    def apply_order_response(self, row: dict[str, Any], response) -> None:
+        """Atomically apply a recovered response through PortfolioService."""
         if self.portfolio is None or response.executed_qty <= ZERO:
             return
         if row["purpose"] == "entry":
@@ -214,7 +217,3 @@ class Reconciler:
                     "stop_breach_native" if row["purpose"] == "protective" else "reconciliation"
                 )
                 self.portfolio.record_exit(position, response, reason)
-                if position.protective_order_id == row["client_order_id"]:
-                    still_open = self.repos.positions.open_position(self.cfg.mode)
-                    if still_open is not None and still_open.position_id == position.position_id:
-                        self.repos.positions.set_protective_order(position.position_id, None)
