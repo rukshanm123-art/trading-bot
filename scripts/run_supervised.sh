@@ -10,6 +10,16 @@ set -euo pipefail
 CONFIG="${1:-config/paper.yaml}"
 cd "$(dirname "$0")/.."
 
+# Load deploy env (DATABASE_URL, notifier secrets) if a .env is present, so a
+# Postgres-backed qualification run always reaches the right database.
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+    echo "[supervisor] loaded .env (DATABASE_URL=${DATABASE_URL:+set})"
+fi
+
 BACKOFF=5
 MAX_BACKOFF=300
 
