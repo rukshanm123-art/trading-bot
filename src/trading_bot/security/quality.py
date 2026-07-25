@@ -84,6 +84,38 @@ def git_info(root: Path) -> tuple[str | None, bool, str]:
     return commit or None, False, "repo"
 
 
+BUILD_INFO_FILE = ".build_info.json"
+
+
+def build_provenance(root: Path) -> tuple[str | None, str]:
+    """Which code is running, for RUNTIME evidence records.
+
+    A container image deliberately ships no ``.git`` (see .dockerignore), so
+    ``git_info`` alone would stamp every record from a Docker deployment
+    ``no_repo`` — and unattributable evidence is rejected by the live gate.
+    The image records its commit at build time instead (Dockerfile
+    ``ARG GIT_COMMIT`` -> ``.build_info.json``), which is equally specific
+    provenance.
+
+    Returns ``(commit, state)`` where state is ``repo``, ``image`` or
+    ``no_repo``. ``no_repo`` means the running code cannot be identified and
+    the evidence it produces will not count.
+
+    This is deliberately NOT used by the quality-record verifier: that record
+    is produced on a developer machine and must still prove a real repository.
+    """
+    commit, _dirty, state = git_info(root)
+    if state == "repo" and commit:
+        return commit, "repo"
+    stamp = root / BUILD_INFO_FILE
+    try:
+        data = json.loads(stamp.read_text(encoding="utf-8"))
+        commit = str(data.get("git_commit") or "").strip()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None, "no_repo"
+    return (commit, "image") if commit else (None, "no_repo")
+
+
 def expected_hashes(root: Path) -> dict[str, str]:
     return {
         "dependency_lock_hash": sha256_file(root / "requirements.txt")

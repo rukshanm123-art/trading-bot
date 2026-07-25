@@ -78,6 +78,17 @@ def run(cmd: list[str], timeout_s: float = 60) -> subprocess.CompletedProcess:
         )
 
 
+def _tool_version(cmd: list[str]) -> str:
+    """First line of a tool's --version, or "unknown" if it produced nothing.
+
+    A momentary empty result (e.g. a --version call that times out under
+    transient disk-I/O pressure) must not crash the whole quality gate with an
+    IndexError; the recorded version string is informational only.
+    """
+    out = run(cmd, 10).stdout.strip().splitlines()
+    return out[0] if out else "unknown"
+
+
 def collect_test_ids() -> list[str]:
     # -o addopts= neutralises the project-level "-q" so node ids are printed
     proc = run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-o", "addopts=", "tests"])
@@ -179,10 +190,10 @@ def main() -> int:
         "git_state": git_state,
         "python": sys.version.split()[0],
         "tool_versions": {
-            "pytest": run([sys.executable, "-m", "pytest", "--version"], 10).stdout.strip(),
-            "ruff": run([tool("ruff"), "--version"], 10).stdout.strip(),
-            "mypy": run([tool("mypy"), "--version"], 10).stdout.strip(),
-            "bandit": run([tool("bandit"), "--version"], 10).stdout.strip().splitlines()[0],
+            "pytest": _tool_version([sys.executable, "-m", "pytest", "--version"]),
+            "ruff": _tool_version([tool("ruff"), "--version"]),
+            "mypy": _tool_version([tool("mypy"), "--version"]),
+            "bandit": _tool_version([tool("bandit"), "--version"]),
         },
         "ran_at": datetime.now(UTC).isoformat(),
     }

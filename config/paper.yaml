@@ -76,7 +76,10 @@ continuation:
 notifications:
   console: true
   email: { enabled: false }
-  telegram: { enabled: false }
+  # Daily report (17:00 NZ) + critical alerts are pushed here. Set
+  # TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env to activate delivery;
+  # without them the notifier logs a warning and is skipped (non-fatal).
+  telegram: { enabled: true }
 
 monitoring:
   enabled: true

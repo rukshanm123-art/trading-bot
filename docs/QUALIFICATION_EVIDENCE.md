@@ -26,6 +26,40 @@ can count toward paper qualification. Historical backtests, offline fixtures,
 synthetic simulations and testnet records count as zero live-market paper days.
 Repeating the same calendar day does not create duplicate day credit.
 
+## When records are written
+
+The engine flushes a record every `EVIDENCE_FLUSH_INTERVAL_S` (30 minutes)
+from the run loop, and once more on clean shutdown. A 24/7 deployment must
+never have to stop to prove that it ran — evidence written only at shutdown
+would leave a continuously running bot at `0/30` days forever.
+
+Each flush covers the window since the previous flush and then advances the
+mark, so consecutive records are **contiguous and non-overlapping**. This
+matters: day credit is the SUM of per-day coverage across records, so
+overlapping windows would manufacture wall-clock time. A day is credited only
+when its records cover ≥ `QUALIFICATION_MIN_DAY_COVERAGE_S` (12 h) *and* the
+database shows ≥ `QUALIFICATION_MIN_DECISIONS_PER_DAY` decisions that day, so
+flushing more often can never buy a day.
+
+A hard kill (SIGKILL, OOM, power loss) loses at most the current unflushed
+window — up to 30 minutes, against a 12-hour daily floor.
+
+## Provenance: which code produced the evidence
+
+Every record names the commit it came from; records that cannot be attributed
+are rejected. Two sources are accepted:
+
+| state | source | typical host |
+| --- | --- | --- |
+| `repo` | a real `.git` checkout | running from source |
+| `image` | `.build_info.json`, written from `ARG GIT_COMMIT` at build time | Docker |
+
+A container image deliberately ships no `.git`, so **Docker deployments must
+be built with the commit stamp** — use `scripts/deploy_update.sh`, not a bare
+`docker compose up -d --build`. Without it the engine refuses to write
+evidence at all (rather than writing records the gate will throw away) and
+logs `NON-QUALIFYING PAPER RUN` at startup plus an error at every flush.
+
 SQLite live-market paper sessions are also deliberately non-qualifying. They
 remain useful for evaluation, but the engine records no qualification evidence
 for them and emits a startup/health warning. Start the real qualification period

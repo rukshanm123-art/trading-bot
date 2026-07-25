@@ -18,7 +18,13 @@ services:
     # not exposed to the host by default; the bot reaches it on the compose network
 
   bot:
-    build: .
+    build:
+      context: .
+      args:
+        # Deploy with scripts/deploy_update.sh, which sets this to the checked
+        # out commit. Without it the image cannot identify itself and records
+        # no live-qualification evidence (the engine warns loudly at startup).
+        GIT_COMMIT: ${GIT_COMMIT:-}
     restart: unless-stopped
     depends_on:
       db:

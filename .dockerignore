@@ -18,3 +18,6 @@ htmlcov
 *.db-shm
 build
 dist
+
+# build provenance stamp is created INSIDE the image, never from the context
+.build_info.json

@@ -137,6 +137,24 @@ def test_sqlite_live_paper_does_not_record_qualification_evidence(tmp_path, monk
     assert rows == []
 
 
+def test_engine_loop_drives_the_qualification_evidence_flush(tmp_path):
+    """The 24/7 regression: evidence accrual must be driven by the RUN LOOP.
+    If only shutdown() records it, a bot that never stops never qualifies."""
+    from trading_bot.engine.scheduler import IntervalTask
+    from trading_bot.security.qualification import EVIDENCE_FLUSH_INTERVAL_S
+
+    rows = make_trend_rows([(40, 0.0)], start_price=100.0)
+    engine = _fixture_engine(tmp_path, rows)
+    assert engine._evidence_task.interval.total_seconds() == EVIDENCE_FLUSH_INTERVAL_S
+
+    calls = []
+    engine._evidence_task = IntervalTask(0, lambda: calls.append(1), engine.clock, "evidence_probe")
+    engine.run(max_cycles=3)
+
+    assert len(calls) == 3  # once per cycle, before any shutdown
+    engine.db.close()
+
+
 def test_unexpected_runtime_failure_blocks_future_entries(tmp_path):
     engine = _fixture_engine(tmp_path, make_trend_rows([(40, 0.0)], start_price=100.0))
 

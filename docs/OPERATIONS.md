@@ -17,9 +17,14 @@ If the editable install misbehaves, prefix commands with `PYTHONPATH=src`.
 
 ```bash
 cp .env.example .env          # set POSTGRES_PASSWORD (+ notifier secrets)
-docker compose up -d --build
+./scripts/deploy_update.sh    # commit-stamped build + up; --no-pull to skip git pull
 docker compose logs -f bot
 ```
+
+Use the script rather than `docker compose up -d --build` directly: it passes
+`GIT_COMMIT`, which is the only way a container (which ships no `.git`) can
+identify its own code. Unidentifiable builds record no qualification evidence
+— see docs/QUALIFICATION_EVIDENCE.md.
 
 The container migrates the DB then starts **paper** mode. Testnet/live
 require editing the command/config deliberately — a restart or redeploy can

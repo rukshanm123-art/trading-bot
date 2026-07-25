@@ -25,6 +25,17 @@ COPY data/fixtures ./data/fixtures
 RUN pip install --no-cache-dir --no-deps . && \
     mkdir -p /app/var && chown -R bot:bot /app/var
 
+# Build provenance. The image ships no .git (see .dockerignore), so runtime
+# qualification evidence would be unattributable — and therefore worthless —
+# without this stamp. Build via scripts/deploy_update.sh (or pass the arg) so
+# GIT_COMMIT is always the deployed commit.
+ARG GIT_COMMIT=""
+RUN printf '{"git_commit": "%s", "built_at": "%s"}\n' \
+        "$GIT_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /app/.build_info.json && \
+    if [ -z "$GIT_COMMIT" ]; then \
+        echo "WARNING: built without GIT_COMMIT — this image records NO qualification evidence"; \
+    fi
+
 USER bot
 
 # Readiness/liveness endpoints (monitoring server binds inside the container).

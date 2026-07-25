@@ -47,6 +47,14 @@ EVIDENCE_KEY_FLAG = "qualification_evidence_key"
 QUALIFICATION_MIN_DAY_COVERAGE_S = 12 * 3600  # a credited day ran >= 12h
 QUALIFICATION_MIN_DECISIONS_PER_DAY = 12  # and the DB saw real decisions
 
+# A 24/7 engine must not have to stop to prove it ran. The engine flushes an
+# evidence record every EVIDENCE_FLUSH_INTERVAL_S and then advances its window
+# mark, so consecutive records are CONTIGUOUS AND NON-OVERLAPPING — required,
+# because summary() SUMS per-day coverage across records and overlapping
+# windows would inflate a day beyond real wall-clock time.
+EVIDENCE_FLUSH_INTERVAL_S = 1800  # 30 min: bounds evidence lost to a hard kill
+EVIDENCE_MIN_WINDOW_S = 60  # windows shorter than this are not worth a record
+
 
 def get_or_create_evidence_key(flags) -> str:
     """The signing key lives in control_flags; created once per database."""

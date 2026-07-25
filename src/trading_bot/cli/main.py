@@ -291,6 +291,36 @@ def cmd_report(args) -> int:
 
 
 # ======================================================================
+def cmd_notify(args) -> int:
+    """Send a test alert to every enabled channel so the operator can confirm
+    delivery (e.g. Telegram) without waiting for the daily report or a real
+    critical event. This never touches the exchange or the risk engine."""
+    cfg, _db, _repos = _load(args)
+    secrets = EnvSecretProvider()
+    from trading_bot.notifications.adapters import build_notification_hub
+
+    hub = build_notification_hub(cfg, secrets)
+    results = hub.send(
+        "Test notification",
+        "If you can read this, trading-bot alerts are working. "
+        "You will receive a daily report and any critical alerts here.",
+        "info",
+    )
+    external = {name: ok for name, ok in results.items() if name != "console"}
+    for name, ok in results.items():
+        print(f"  [{'SENT' if ok else 'FAIL'}] {name}")
+    if not external:
+        print("\nno external channel enabled — set telegram/email in the config.")
+        return 1
+    all_ok = all(external.values())
+    print(
+        "\ntest alert delivered."
+        if all_ok
+        else "\nsome channels failed — check the token/chat id in .env and try again."
+    )
+    return 0 if all_ok else 1
+
+
 def cmd_live(args) -> int:
     cfg, db, repos = _load(args)
     secrets = EnvSecretProvider()
@@ -510,6 +540,12 @@ def build_parser() -> argparse.ArgumentParser:
     qusub = qu.add_subparsers(dest="quality_cmd", required=True)
     qusub.add_parser("run").set_defaults(fn=cmd_quality)
     qusub.add_parser("verify").set_defaults(fn=cmd_quality)
+
+    nt = sub.add_parser("notify", help="notification channels")
+    ntsub = nt.add_subparsers(dest="notify_cmd", required=True)
+    ntsub.add_parser("test", help="send a test message to every enabled channel").set_defaults(
+        fn=cmd_notify
+    )
 
     sub.add_parser("version").set_defaults(fn=lambda a: print(__version__) or 0)
     return p

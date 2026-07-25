@@ -119,3 +119,39 @@ def test_pause_then_status_shows_paused(project, capsys):
     capsys.readouterr()
     assert main(["--config", cfg_path, "status"]) == 0
     assert "Paused flag:         True" in capsys.readouterr().out
+
+
+def test_notify_test_without_external_channel_fails_cleanly(project, capsys):
+    """`notify test` on a console-only config exits 1 and says why, rather
+    than pretending an alert channel exists."""
+    cfg_path, _ = project  # telegram/email disabled in this fixture
+    rc = main(["--config", cfg_path, "notify", "test"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "no external channel enabled" in out
+
+
+def test_notify_test_reports_channel_delivery(project, capsys, monkeypatch, tmp_path):
+    """With Telegram enabled but the network call stubbed, the command reports
+    per channel and succeeds when the channel accepts the message."""
+    cfg_path, _ = project
+    written = tmp_path / "config.yaml"
+    written.write_text(
+        written.read_text(encoding="utf-8").replace(
+            "telegram: { enabled: false }", "telegram: { enabled: true }"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token-0123456789")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+
+    import trading_bot.notifications.adapters as adapters
+
+    monkeypatch.setattr(
+        adapters.TelegramNotifier, "send", lambda self, subj, body, severity="info": True
+    )
+    rc = main(["--config", cfg_path, "notify", "test"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[SENT] telegram" in out
+    assert "test alert delivered" in out

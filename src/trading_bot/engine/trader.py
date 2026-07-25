@@ -76,6 +76,8 @@ from trading_bot.risk.engine import GateContext, RiskEngine
 from trading_bot.risk.sizing import size_exit_qty
 from trading_bot.risk.state import RiskStateService
 from trading_bot.security.livegate import LiveGate
+from trading_bot.security.qualification import EVIDENCE_FLUSH_INTERVAL_S
+from trading_bot.security.quality import BUILD_INFO_FILE, build_provenance
 from trading_bot.security.secrets import EnvSecretProvider, SecretProvider
 from trading_bot.storage.audit import AuditLog
 from trading_bot.storage.db import Database
@@ -251,6 +253,12 @@ class TradingEngine:
         self._alerted_codes_day: tuple[str, set[str]] = ("", set())
         self._reconcile_task = IntervalTask(1800, self._reconcile, self.clock, "reconcile")
         self._integrity_task = IntervalTask(3600, self._check_db, self.clock, "db_integrity")
+        self._evidence_task = IntervalTask(
+            EVIDENCE_FLUSH_INTERVAL_S,
+            self._record_session_evidence,
+            self.clock,
+            "qualification_evidence",
+        )
 
     # ==================================================================
     def request_stop(self) -> None:
@@ -319,6 +327,24 @@ class TradingEngine:
                         "qualification",
                         "not eligible: live-market PAPER qualification requires PostgreSQL",
                     )
+                # Provenance is checked at STARTUP, not silently at the first
+                # flush 30 minutes later: an unidentifiable build records no
+                # evidence at all, and finding that out on day 30 is the whole
+                # failure this check exists to prevent.
+                commit, state = build_provenance(self.root)
+                if state == "no_repo":
+                    log.warning(
+                        "NON-QUALIFYING PAPER RUN: the running code cannot be identified "
+                        "(no .git checkout and no %s build stamp), so no LIVE qualification "
+                        "evidence will be recorded. Rebuild with scripts/deploy_update.sh.",
+                        BUILD_INFO_FILE,
+                    )
+                    HEALTH.note(
+                        "qualification",
+                        "not eligible: running code has no identifiable commit",
+                    )
+                else:
+                    log.info("qualification provenance: %s %s", state, commit)
 
     def _apply_account_fee(self) -> None:
         """Use the account's REAL taker commission for sizing instead of the
@@ -397,6 +423,11 @@ class TradingEngine:
                 except Exception as exc:
                     log.exception("cycle failed")
                     self._fail_runtime_closed(exc)
+                # Outside the cycle try/except on purpose: qualification
+                # evidence must keep accruing for a long-running engine even
+                # while individual cycles are failing. Days still only count
+                # when the database shows real decisions for them.
+                self._evidence_task.maybe_run()
                 if self.fixture is not None:
                     if not self.fixture.advance():
                         log.info("fixture exhausted after %s cycles", cycles)
@@ -604,9 +635,19 @@ class TradingEngine:
         self.lock.heartbeat()
 
     def _record_session_evidence(self) -> None:
-        """Signed live-qualification evidence: only REAL paper sessions on
-        live market data backed by PostgreSQL count. Fixtures, backtests and
-        SQLite paper sessions record nothing."""
+        """Flush signed live-qualification evidence for the window that has
+        elapsed since the last flush, then advance the window mark.
+
+        Called periodically (not only at shutdown): a 24/7 engine never shuts
+        down, and evidence written only on exit would credit zero days forever.
+        Each flush covers ``[mark, now]`` and then sets ``mark = now``, so the
+        records are contiguous and NEVER overlap — summary() sums per-day
+        coverage across records, and overlapping windows would fabricate
+        wall-clock time.
+
+        Only REAL paper sessions on live market data backed by PostgreSQL
+        count. Fixtures, backtests and SQLite paper sessions record nothing.
+        """
         if self.cfg.mode != Mode.PAPER or self.fixture is not None:
             return
         if self.cfg.data.source != "exchange":
@@ -622,13 +663,29 @@ class TradingEngine:
         from datetime import UTC as _UTC
 
         from trading_bot.security.qualification import (
+            EVIDENCE_MIN_WINDOW_S,
             QualificationEvidenceStore,
             get_or_create_evidence_key,
         )
-        from trading_bot.security.quality import git_info
 
-        commit, _dirty, git_state = git_info(self.root)
+        end = datetime.now(_UTC)
+        if (end - start).total_seconds() < EVIDENCE_MIN_WINDOW_S:
+            return  # nothing meaningful elapsed; leave the mark where it is
+
+        commit, git_state = build_provenance(self.root)
+        if git_state == "no_repo":
+            # Unattributable evidence is rejected by the live gate AND poisons
+            # the summary, so writing it would silently burn the whole
+            # qualification period. Refuse, keep the mark, and say so.
+            log.error(
+                "qualification evidence NOT recorded: the running code cannot be "
+                "identified (no .git and no %s build stamp). Rebuild with "
+                "scripts/deploy_update.sh so the image records its commit.",
+                BUILD_INFO_FILE,
+            )
+            return
         decisions_now = self.repos.decisions.count(self.cfg.mode)
+        decisions_start = getattr(self, "_session_decisions_start", decisions_now)
         store = QualificationEvidenceStore(
             self.root, key=get_or_create_evidence_key(self.repos.flags)
         )
@@ -638,9 +695,8 @@ class TradingEngine:
                 "data_source_class": "live_market",
                 "database_backend": self.db.backend,
                 "wall_clock_start": start.isoformat(),
-                "wall_clock_end": datetime.now(_UTC).isoformat(),
-                "eligible_decisions": decisions_now
-                - getattr(self, "_session_decisions_start", decisions_now),
+                "wall_clock_end": end.isoformat(),
+                "eligible_decisions": decisions_now - decisions_start,
                 "configuration_hash": self.cfg_hash,
                 "strategy_version": f"{self.strategy.name}@{self.strategy.version}",
                 "git_commit": commit,
@@ -648,7 +704,15 @@ class TradingEngine:
                 "symbol": self.cfg.symbol,
             }
         )
-        log.info("qualification evidence recorded for this paper session")
+        # advance the mark ONLY after a durable append: the next window starts
+        # where this one ended, so no second of runtime is counted twice.
+        self._session_wall_start = end
+        self._session_decisions_start = decisions_now
+        log.info(
+            "qualification evidence flushed (%.1f min, %s decisions)",
+            (end - start).total_seconds() / 60,
+            decisions_now - decisions_start,
+        )
 
     def _maybe_sweep_dust(self, quote, cid: str) -> None:
         """Aggregated exchange dust becomes sellable once it clears the

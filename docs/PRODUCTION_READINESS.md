@@ -21,6 +21,12 @@ profitability claim, or authorization to trade. LIVE remains locked by default.
   backoff.
 - Startup and periodic reconciliation, one-writer lock, deterministic risk
   caps, kill switches, circuit breaker, health/metrics and hash-chained audit.
+- Qualification evidence flushed every 30 minutes from the run loop in
+  contiguous, non-overlapping windows, so a continuously running deployment
+  accrues days without stopping and cannot inflate coverage by flushing more
+  often. Records carry build provenance (`repo` checkout or image
+  `.build_info.json`); an unidentifiable build writes no evidence and says so
+  at startup instead of failing silently.
 - LIVE gate requiring qualification evidence, clean/fresh quality evidence,
   explicit risk config, PostgreSQL, externally reachable alerts, credentials,
   environment opt-in and an interactive unlock ceremony. PostgreSQL and an

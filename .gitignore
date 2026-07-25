@@ -26,3 +26,6 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# build provenance stamp (created inside the container image)
+.build_info.json
