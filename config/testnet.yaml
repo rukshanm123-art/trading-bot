@@ -71,7 +71,9 @@ continuation:
 notifications:
   console: true
   email: { enabled: false }
-  telegram: { enabled: false }
+  # Reuse the same TELEGRAM_* env as paper; alerts here are tagged [testnet]
+  # so you can watch drill results (brakes engaging, orders) remotely.
+  telegram: { enabled: true }
 
 monitoring:
   enabled: true

@@ -1,0 +1,49 @@
+# =====================================================================
+# TESTNET stack — official Binance Spot Testnet, Stage 4 failure drills.
+#
+# Deliberately SEPARATE from docker-compose.yml (the paper qualification
+# stack) so it can run on its own host without ever touching the paper run
+# or its instance lock. Testnet is drills, not qualification, so it uses
+# SQLite — no PostgreSQL service needed.
+#
+# Always deploy with scripts/deploy_testnet.sh (stamps the image commit).
+# =====================================================================
+services:
+  bot:
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    image: trading-bot-testnet:latest
+    restart: unless-stopped
+    # Override the image default (which runs PAPER): run the config's mode,
+    # which is testnet. `run` refuses to start LIVE without the full gate.
+    command:
+      - sh
+      - -c
+      - >
+        python -m trading_bot --config config/testnet.yaml db migrate &&
+        python -m trading_bot --config config/testnet.yaml run
+    environment:
+      BINANCE_TESTNET_API_KEY: ${BINANCE_TESTNET_API_KEY:?set BINANCE_TESTNET_API_KEY in .env}
+      BINANCE_TESTNET_API_SECRET: ${BINANCE_TESTNET_API_SECRET:?set BINANCE_TESTNET_API_SECRET in .env}
+      TRADING_KILL_SWITCH: ${TRADING_KILL_SWITCH:-false}
+      # Live can never start from this stack regardless of this value.
+      LIVE_TRADING_ENABLED: "false"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      MONITORING_TOKEN: ${MONITORING_TOKEN:-}
+    volumes:
+      - botvar_testnet:/app/var
+    # Same minimal-privilege hardening as the paper stack. The SQLite DB and
+    # reports live in the named volume, which stays writable under read_only.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  botvar_testnet:
