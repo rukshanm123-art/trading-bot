@@ -12,6 +12,25 @@ C="sudo docker compose -f docker-compose.testnet.yml"
 CFG="--config config/testnet.yaml"
 ```
 
+## 0. One-time (and post-reset) account prep — start flat on cash
+
+The Binance testnet faucet funds each account with a basket including **~1 BTC**.
+The engine (correctly) fail-closes at startup on base-asset holdings it did not
+buy — a live account is funded with clean quote only. So sell the faucet BTC to
+USDT once, so the testnet account starts flat like live will:
+
+```bash
+# run on the HOST (a fresh 1-BTC faucet balance makes the container fail-closed
+# and crash-loop, so you can't `exec` into it — the script reads keys from ./.env)
+python3 scripts/testnet_reset_to_cash.py
+$C up -d bot          # start / restart the bot once the account is cash
+```
+> This is an **operator** step — the engine never sells holdings it didn't buy.
+> A tiny sub-minNotional BTC remainder (< ~5 USDT) can't be sold; testnet's
+> `max_reconciliation_mismatch_quote` (2 USDT) tolerates that untradeable dust.
+> **Binance testnet wipes and re-funds balances roughly monthly** — after each
+> reset, re-run the command above, then `$C up -d bot`.
+
 ---
 
 ## A. Failure drills (Stage 4)

@@ -39,7 +39,12 @@ risk:
   candle_grace_s: 90
   max_gap_pct: "10"
   max_api_errors_per_hour: 10
-  max_reconciliation_mismatch_quote: "0.05"
+  # Testnet only: the Binance faucet funds ~1 BTC, and selling it back to a
+  # clean cash start leaves sub-minNotional BTC dust (< ~5 USDT) that CANNOT be
+  # traded away. Tolerate it here so startup reconciliation does not fail-closed
+  # on untradeable dust. LIVE keeps the tight 0.05 (a live account is funded
+  # with clean quote, no faucet dust). See docs/TESTNET_DRILLS.md.
+  max_reconciliation_mismatch_quote: "2.00"
   protective_exit_buffer_bps: "100"
   max_clock_skew_s: 30
   market_data_recovery_successes: 2
