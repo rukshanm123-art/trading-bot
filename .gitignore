@@ -29,3 +29,6 @@ htmlcov/
 
 # build provenance stamp (created inside the container image)
 .build_info.json
+
+# research: downloaded archives + derived datasets (reproducible, not source)
+research/data/

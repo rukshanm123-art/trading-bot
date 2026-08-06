@@ -1,0 +1,183 @@
+# =====================================================================
+# PRE-REGISTERED RESEARCH SPECIFICATION
+#
+# This file is the contract. It is committed BEFORE any model is trained
+# and its SHA-256 is recorded in every experiment ledger entry. Changing
+# any value here invalidates every prior label and result: the labels
+# depend on the exit rules and the EMA parameters below, so a change is a
+# NEW experiment series, not a tweak.
+#
+# Approach: EMA meta-labelling. The existing EMA strategy proposes entries;
+# the model only ACCEPTS or REJECTS them. The model never sizes positions
+# and never reaches the exchange — the risk engine keeps final authority.
+# =====================================================================
+spec_version: 1
+
+market:
+  symbol: BTCUSDT
+  interval: 1h
+  venue: binance-spot
+  direction: long_or_cash          # no shorting, no leverage, no margin
+
+# ---------------------------------------------------------------------
+# Entry/exit semantics — MUST match src/trading_bot/strategies/ema_trend.py
+# exactly. The label is defined by these rules; if runtime changes, this
+# spec and all labels are invalid.
+# ---------------------------------------------------------------------
+strategy:
+  name: ema_trend
+  version: "1.0.0"
+  # FROZEN. The meta-label depends on the EMA exit, so these parameters are
+  # part of the label definition, not a tunable.
+  params:
+    fast: 12
+    slow: 26
+  entry_rule: "diff_prev <= 0 < diff_now AND flat"     # edge-triggered cross up
+  exit_rules:
+    - "protective stop: 2.0% below entry (exit monitor)"
+    - "EMA exit: diff_prev >= 0 > diff_now while holding"
+    - "safety net: diff_now < 0 while holding"
+  # v1 deliberately has NO take-profit and NO forced timeout, because the
+  # RUNTIME has neither. Adding them would require changing the exit manager
+  # and re-qualifying. Label = whichever runtime exit fires FIRST.
+  take_profit: null
+  timeout_hours: null
+
+stop_loss_pct: "2.0"
+
+# ---------------------------------------------------------------------
+# Fill-cost assumptions (deliberately pessimistic)
+# ---------------------------------------------------------------------
+costs:
+  taker_fee_bps: "10"          # 0.10% spot taker; do NOT assume the BNB discount
+  spread_bps: "5"              # half-spread applied on each side
+  slippage_bps: "8"
+  # Robustness requirement: promotion must survive doubling all of the above.
+  stress_multiplier: 2
+
+# ---------------------------------------------------------------------
+# Ambiguous-bar policy (1h OHLC cannot resolve intrabar order)
+# ---------------------------------------------------------------------
+ambiguity:
+  both_barriers_touched: stop_first        # always the pessimistic branch
+  gap_through_stop: next_executable_bid    # NOT the stop price
+  entry_fill: next_candle_executable_ask   # never the signal candle's close
+  event_spanning_data_gap: discard
+
+# ---------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------
+data:
+  source: https://data.binance.vision/data/spot/monthly/klines
+  start: "2018-01"
+  end: "2026-07"
+  verify_checksums: true
+  forward_fill: false            # never; gaps become segment boundaries
+  # Archived spot data from 2025-01-01 uses MICROSECOND timestamps.
+  # The importer detects the unit by magnitude rather than by date.
+
+# ---------------------------------------------------------------------
+# Features — capped deliberately. No expansion after seeing validation
+# results. Warmup is DERIVED from the longest lookback, never hard-coded.
+# ---------------------------------------------------------------------
+features:
+  max_count: 15
+  list:
+    - ret_1h
+    - ret_3h
+    - ret_6h
+    - ret_12h
+    - ret_24h
+    - ema_distance
+    - ema_slope
+    - rsi_14
+    - atr_14
+    - realized_vol_24h
+    - candle_range
+    - body_size
+    - volume_change
+    - volume_zscore_24h
+    - dist_from_high_24h
+
+# ---------------------------------------------------------------------
+# Chronological validation. Expanding walk-forward, embargo >= horizon so
+# overlapping outcomes cannot leak across the boundary.
+# ---------------------------------------------------------------------
+validation:
+  scheme: expanding_walk_forward
+  embargo_hours: 24              # >= max holding period observed in labels
+  folds:
+    - {train: ["2018-01", "2021-12"], validate: ["2022-01", "2022-12"]}
+    - {train: ["2018-01", "2022-12"], validate: ["2023-01", "2023-12"]}
+    - {train: ["2018-01", "2023-12"], validate: ["2024-01", "2024-12"]}
+  final_test: ["2025-01", "2026-07"]   # evaluated ONCE, after all selection
+  measure_label_uniqueness: true       # report; never assume a divisor
+
+models:
+  default: logistic_regression
+  candidate: hist_gradient_boosting
+  # HGB is promoted over LR only on a large, stable improvement present in
+  # EVERY fold. Calibrate the winner before threshold selection.
+  calibrate: true
+
+# ---------------------------------------------------------------------
+# Anti-overfitting budget. Every run appends to the experiment ledger;
+# exceeding this budget invalidates the series.
+# ---------------------------------------------------------------------
+experiments:
+  max_total: 30
+  ledger: research/experiments.jsonl
+
+# ---------------------------------------------------------------------
+# Benchmarks. The matched-random benchmark is the real null: same trade
+# count, same holding-time distribution, same costs. Report the model's
+# PERCENTILE within the random distribution, not just pass/fail.
+# ---------------------------------------------------------------------
+benchmarks:
+  - ema_alone
+  - buy_and_hold
+  - all_cash
+  - matched_random
+matched_random:
+  seeds: 1000
+  required_percentile: 95
+
+# ---------------------------------------------------------------------
+# Promotion thresholds. Any failure => NO PROMOTION. Too few trades =>
+# INCONCLUSIVE (never "pass"), regardless of profitability.
+# ---------------------------------------------------------------------
+promotion:
+  min_oos_trades_final_fold: 30        # below this => INCONCLUSIVE
+  require_positive_most_recent_fold: true
+  require_positive_net_expectancy: true
+  require_beat_ema_baseline: true
+  require_beat_random_percentile: 95
+  require_survive_stressed_costs: true
+  max_drawdown_pct: "8"                # matches the live risk cap
+  max_single_trade_pnl_share: "0.30"
+  max_single_month_pnl_share: "0.40"
+
+# ---------------------------------------------------------------------
+# Sizing assumption used for backtest P&L. CRITICAL: a model validated at
+# a notional the live account cannot reach will emit ZERO live trades.
+# Measured 2026-08-06: config/paper.yaml needs >= 35 USDT equity before
+# size_entry stops returning PROTECTIVE_EXIT_NOT_REPRESENTABLE.
+# ---------------------------------------------------------------------
+sizing:
+  backtest_equity_usdt: "35"
+  intended_live_equity_usdt: "35"
+  min_notional_usdt: "5"
+  note: >
+    Promotion requires viability at intended_live_equity_usdt, not at some
+    convenient larger notional. If the intended live equity changes, this
+    spec changes and the series restarts.
+
+# ---------------------------------------------------------------------
+# Runtime binding (applies only if something is ever promoted)
+# ---------------------------------------------------------------------
+runtime:
+  interface: "trading_bot.strategies.interface.Strategy.evaluate"
+  artifact_sha256_in_config: true   # binds model -> config hash -> evidence
+  on_missing_or_mismatched_artifact: hold_and_block_entries
+  model_may_size_positions: false
+  model_may_bypass_risk_engine: false
