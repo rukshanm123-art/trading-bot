@@ -113,7 +113,8 @@ def main() -> int:
     for e in train:
         i = e["signal_idx"]
         e2 = dict(e)
-        e2["above_ema200"] = (lambda a: None if a is None else closes[i] > a)(ema200_at(i))
+        ema_ref = ema200_at(i)
+        e2["above_ema200"] = None if ema_ref is None else closes[i] > ema_ref
         e2["vol24"] = vol24_at(i)
         e2["ret30d"] = ret30d_at(i)
         e2["sep"] = sep_at(i)
