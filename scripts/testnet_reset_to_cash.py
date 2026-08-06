@@ -16,6 +16,7 @@ Uses Decimal flooring so no unsellable sub-minNotional BTC dust is left
 behind (naive float flooring of 1.0/0.00001 rounds to 0.99999 and strands
 0.00001 BTC).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -65,13 +66,13 @@ def _signed(path: str, params: dict, method: str = "GET"):
         req = urllib.request.Request(
             BASE + path, data=body, headers={"X-MBX-APIKEY": KEY}, method="POST"
         )
-    with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 - fixed host
+    with urllib.request.urlopen(req, timeout=15) as resp:
         return json.load(resp)
 
 
 def _public(path: str, params: dict):
     url = f"{BASE}{path}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(url, timeout=15) as resp:  # noqa: S310 - fixed host
+    with urllib.request.urlopen(url, timeout=15) as resp:
         return json.load(resp)
 
 
