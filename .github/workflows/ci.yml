@@ -42,10 +42,10 @@ jobs:
           pip install -e .
 
       - name: Format check
-        run: ruff format --check src tests scripts
+        run: ruff format --check src tests scripts research
 
       - name: Lint
-        run: ruff check src tests scripts
+        run: ruff check src tests scripts research
 
       - name: Type check
         run: mypy

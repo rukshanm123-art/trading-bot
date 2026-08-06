@@ -8,7 +8,7 @@ If that is the real defect, scaling should lift expectancy WITHOUT any
 classifier.
 
 DISCIPLINE
-  * Train years only (<= 2024). 2025-2026 stays sealed.
+  * In-scope years only (<= 2024). Later years are BURNED, not sealed.
   * The k grid is fixed in advance and EVERY value is reported. No searching
     for a k that happens to work.
   * Changing the stop changes the labels, so this is a NEW experiment series
@@ -27,13 +27,13 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import statistics
 import sys
-from datetime import UTC, datetime
 from decimal import Decimal
 
 from events import ROOT, atr_series, build_events, load_candles, load_spec
+from provenance import LEDGER
+from provenance import append as provenance_append
 
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -42,7 +42,6 @@ from trading_bot.core.models import SymbolRules
 from trading_bot.core.types import dec
 from trading_bot.risk.sizing import SizingInputs, size_entry
 
-LEDGER = ROOT / "research" / "experiments.jsonl"
 TRAIN_MAX_YEAR = 2024
 ATR_PERIOD = 14
 
@@ -196,22 +195,16 @@ def main() -> int:
         print("its cause. It does mean the only remaining candidate edge is regime")
         print("SELECTION, and 0b sized that at roughly +0.06%/trade in-sample.")
 
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER.open("a", encoding="utf-8") as fh:
-        fh.write(
-            json.dumps(
-                {
-                    "experiment": "step1_atr_stop",
-                    "ran_at": datetime.now(UTC).isoformat(),
-                    "scope": f"train years <= {TRAIN_MAX_YEAR} (final test sealed)",
-                    "atr_period": ATR_PERIOD,
-                    "k_grid": [str(k) for k in K_GRID],
-                    "equity_usdt": str(equity),
-                    "results": results,
-                }
-            )
-            + "\n"
-        )
+    provenance_append(
+        {
+            "experiment": "step1_atr_stop",
+            "scope": f"in-scope years <= {TRAIN_MAX_YEAR}; later years BURNED and excluded",
+            "atr_period": ATR_PERIOD,
+            "k_grid": [str(k) for k in K_GRID],
+            "equity_usdt": str(equity),
+            "results": results,
+        }
+    )
     print(f"\nlogged to {LEDGER}")
     return 0
 

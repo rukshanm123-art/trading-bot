@@ -105,13 +105,49 @@ features:
 # ---------------------------------------------------------------------
 validation:
   scheme: expanding_walk_forward
-  embargo_hours: 24              # >= max holding period observed in labels
+  # Purging uses each event's ACTUAL EXIT timestamp, not a fixed horizon. The
+  # label has no timeout, so holding periods are unbounded (observed max 285h
+  # against the 24h that was originally specified). A train event whose exit
+  # falls inside the validation fold, or within embargo_hours of its start, is
+  # DROPPED. The previous fixed 24h embargo was never implemented in code at
+  # all: folds were split on entry year only.
+  purge_by: exit_timestamp
+  embargo_hours: 48
   folds:
     - {train: ["2018-01", "2021-12"], validate: ["2022-01", "2022-12"]}
     - {train: ["2018-01", "2022-12"], validate: ["2023-01", "2023-12"]}
     - {train: ["2018-01", "2023-12"], validate: ["2024-01", "2024-12"]}
-  final_test: ["2025-01", "2026-07"]   # evaluated ONCE, after all selection
+  # Internal CV (threshold selection + probability calibration) must be
+  # chronological too. Ordinary KFold shuffles time inside the training set;
+  # it does not expose the validation year, but it makes both steps
+  # unrealistic. TimeSeriesSplit is required.
+  internal_cv: time_series_split
   measure_label_uniqueness: true       # report; never assume a divisor
+
+# ---------------------------------------------------------------------
+# HOLDOUT STATUS — read before quoting any result as out-of-sample.
+#
+# 2018-01 .. 2026-07 is BURNED. It cannot serve as an untouched final test.
+# Step 0 reported aggregate outcomes (expectancy, profit factor, buy-and-hold)
+# over ALL events including 2025-2026 before any model was fitted, and step 2
+# printed a base positive rate across the same pool. The period has been
+# observed; calling it sealed afterwards would be false.
+#
+# Measured after the fact, the burned period looks like the rest
+# (positive rate 22.33% through 2024 vs 22.50% in 2025-2026), so it very
+# probably did not change the NO PROMOTION conclusion — but "probably
+# harmless" is not "untouched", and only the latter is a valid holdout.
+#
+# A genuine holdout must therefore start PROSPECTIVELY, after the date this
+# was recognised. It accrues in real time and may be evaluated ONCE, only
+# when it holds at least min_events, and only after selection is frozen.
+# ---------------------------------------------------------------------
+holdout:
+  observed_through: "2026-07"          # everything up to here is burned
+  prospective_start: "2026-08-01"
+  min_events_before_evaluation: 30
+  evaluations_permitted: 1
+  status: accruing                     # do NOT evaluate before min_events
 
 models:
   default: logistic_regression

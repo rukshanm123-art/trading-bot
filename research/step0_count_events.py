@@ -42,6 +42,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from trading_bot.strategies.interface import ema_series  # noqa: E402
 
 DATA = ROOT / "research" / "data" / "BTCUSDT-1h.csv"
+OBSERVED_THROUGH = 2024  # later years are burned; never summarise them here
 SPEC = ROOT / "research" / "research_spec.yaml"
 BPS = Decimal(10000)
 
@@ -179,6 +180,15 @@ def main() -> int:
     if not events:
         raise SystemExit("no events found — check the data range")
 
+    # SCOPE. This script originally reported expectancy, profit factor and
+    # buy-and-hold across ALL events, including 2025-2026 — which BURNED that
+    # period as a holdout before any model was fitted. Analysis is now limited
+    # to OBSERVED_THROUGH, and the excluded count is stated rather than hidden.
+    # (The damage is historical and cannot be undone: a genuine holdout now
+    # accrues prospectively from 2026-08. See research_spec.yaml.)
+    burned = [e for e in events if e["entry_time"].year > OBSERVED_THROUGH]
+    events = [e for e in events if e["entry_time"].year <= OBSERVED_THROUGH]
+
     wins = sum(1 for e in events if e["profitable"])
     win_rets = [e["net_return"] for e in events if e["profitable"]]
     loss_rets = [e["net_return"] for e in events if not e["profitable"]]
@@ -199,6 +209,10 @@ def main() -> int:
     print("STEP 0 — EMA meta-label event supply")
     print("=" * 62)
     print(f"candle rows              : {n}")
+    print(
+        f"scope                    : events through {OBSERVED_THROUGH} "
+        f"({len(burned)} later events excluded, unreported)"
+    )
     print(
         f"data span                : {candles[0]['t'].date()} -> {candles[-1]['t'].date()}"
         f"  ({span_days} days)"

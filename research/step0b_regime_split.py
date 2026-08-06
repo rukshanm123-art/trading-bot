@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """STEP 0b — feasibility probe: can ANY crude regime split move the base rate?
 
-Rationale: the EMA baseline loses money (expectancy -0.172%/trade). Meta-
+Rationale: the EMA baseline loses money (expectancy -0.096%/trade in-scope).
+Meta-
 labelling can only rescue it if trade quality is CONDITIONAL on something
 observable at decision time. If four obvious, standard splits cannot move the
 22.4% base rate at all, a fifteen-feature model is unlikely to either — and
 that is worth knowing before building one.
 
 DISCIPLINE
-  * TRAIN YEARS ONLY (<= 2024). The 2025-2026 final test stays sealed; it is
-    evaluated once, after all selection, per research_spec.yaml.
+  * IN-SCOPE YEARS ONLY (<= 2024). Later years are BURNED, not sealed (see
+    research_spec.yaml); they are excluded and never summarised here.
   * ALL splits are reported, not the best one. Reporting only the winner is
     exactly how multiple-comparison noise becomes a "discovery".
   * Splits are standard and fixed in advance (trend / direction / volatility /
@@ -25,17 +26,16 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import statistics
-from datetime import UTC, datetime
 from decimal import Decimal
 
-from events import ROOT, build_events, load_candles, load_spec
+from events import build_events, load_candles, load_spec
+from provenance import LEDGER
+from provenance import append as provenance_append
 
 from trading_bot.strategies.interface import ema_series
 
-LEDGER = ROOT / "research" / "experiments.jsonl"
-TRAIN_MAX_YEAR = 2024  # 2025-2026 is the sealed final test
+TRAIN_MAX_YEAR = 2024  # later years are BURNED, not sealed — excluded, unreported
 
 # Break-even needs expectancy > 0; that is the only bar that matters per subset,
 # because the payoff ratio differs between subsets.
@@ -65,7 +65,7 @@ def main() -> int:
     events, _ = build_events(candles, spec)
 
     train = [e for e in events if e["entry_time"].year <= TRAIN_MAX_YEAR]
-    sealed = len(events) - len(train)
+    excluded = len(events) - len(train)
 
     closes = [float(c["c"]) for c in candles]
     n = len(closes)
@@ -156,7 +156,7 @@ def main() -> int:
     print("=" * 72)
     print("STEP 0b — regime feasibility probe (TRAIN YEARS ONLY, <= 2024)")
     print("=" * 72)
-    print(f"train events : {base['n']}   (sealed 2025-2026 events held out: {sealed})")
+    print(f"train events : {base['n']}   (post-2024 events excluded: {excluded})")
     print(
         f"baseline     : win {base['win_rate_pct']}%   "
         f"expectancy {base['expectancy_pct']:+.4f}%   total {base['total_pct']:+.1f}%"
@@ -201,22 +201,16 @@ def main() -> int:
         print("honest read is that the EDGE IS NOT IN THE FILTER — it is the entry")
         print("rule itself. Revisit the entry, not the classifier.")
 
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER.open("a", encoding="utf-8") as fh:
-        fh.write(
-            json.dumps(
-                {
-                    "experiment": "step0b_regime_split",
-                    "ran_at": datetime.now(UTC).isoformat(),
-                    "scope": f"train years <= {TRAIN_MAX_YEAR} (final test sealed)",
-                    "comparisons": len(rows),
-                    "baseline": base,
-                    "subsets": rows,
-                    "positive_subsets": len(positive),
-                }
-            )
-            + "\n"
-        )
+    provenance_append(
+        {
+            "experiment": "step0b_regime_split",
+            "scope": f"in-scope years <= {TRAIN_MAX_YEAR}; later years BURNED and excluded",
+            "comparisons": len(rows),
+            "baseline": base,
+            "subsets": rows,
+            "positive_subsets": len(positive),
+        }
+    )
     print(f"\nlogged to {LEDGER}")
     return 0
 

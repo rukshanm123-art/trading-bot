@@ -1,0 +1,22 @@
+{
+  "candle_rows": 75096,
+  "events": 1030,
+  "discarded_gap": 12,
+  "profitable": 230,
+  "positive_rate": 0.22330097087378642,
+  "avg_hold_hours": 27.73106796116505,
+  "by_year": {
+    "2018": 131,
+    "2019": 151,
+    "2020": 138,
+    "2021": 155,
+    "2022": 153,
+    "2023": 158,
+    "2024": 144
+  },
+  "by_exit_reason": {
+    "ema_exit": 730,
+    "stop": 300
+  },
+  "verdict": "GO"
+}

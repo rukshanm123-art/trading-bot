@@ -5,17 +5,25 @@ The model only ACCEPTS or REJECTS entries the EMA strategy already proposed.
 It never sizes and never reaches an exchange.
 
 DISCIPLINE
-  * Folds and the embargo come from research_spec.yaml. The 2025-2026 final
-    test is NEVER loaded here — an assertion enforces it.
+  * Events after OBSERVED_THROUGH are DROPPED before anything is computed.
+    2025-2026 is BURNED, not sealed: step 0 reported aggregate outcomes over
+    it before any model was fitted. An earlier version of this file asserted
+    those years were PRESENT and printed a positive rate spanning them, which
+    is the opposite of holding them out. A genuine holdout now accrues
+    prospectively from 2026-08 (see research_spec.yaml).
+  * PURGING is by each event's actual EXIT timestamp plus an embargo, because
+    the label has no timeout and holds run up to 285h. Splitting on entry year
+    alone leaked labels across the fold boundary.
+  * Internal CV (threshold selection AND probability calibration) uses
+    TimeSeriesSplit. Ordinary KFold shuffles time inside the training set.
   * The accept threshold is chosen on TRAIN ONLY, from cross-validated
     out-of-fold probabilities. Choosing it on the validation fold would be
     the classic way to fabricate an edge.
-  * The benchmark is MATCHED-RANDOM: accept the same NUMBER of trades at
-    random, 1000 seeds, and report where the model falls in that distribution.
-    Beating "all trades" is easy; beating random selection of equal size is
-    the real null.
+  * The benchmark matches the model on trade count AND holding-time
+    distribution, so the null has comparable exposure rather than merely
+    comparable size.
   * Both models are reported, and the cost-stress re-run is reported, whatever
-    they say. Logged to the experiment ledger.
+    they say. Every run is logged with spec/data/feature/git hashes.
 
 Usage:
     python3 research/step2_walkforward.py [--stress]
@@ -24,20 +32,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import random
 import sys
 import warnings
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import numpy as np
 from events import ROOT, build_events, load_candles, load_spec
 from features import FEATURE_NAMES, build_feature_matrix
+from provenance import LEDGER
+from provenance import append as provenance_append
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import cross_val_predict
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -52,9 +61,9 @@ from trading_bot.strategies.interface import ema_series
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn")
 warnings.filterwarnings("ignore", message="Unknown solver options")
 
-LEDGER = ROOT / "research" / "experiments.jsonl"
 FOLDS = [((2018, 2021), 2022), ((2018, 2022), 2023), ((2018, 2023), 2024)]
-SEALED_FROM = 2025  # final test — never read here
+OBSERVED_THROUGH = 2024  # folds stop here; 2025-2026 is BURNED, not sealed
+EMBARGO_HOURS = 48  # applied on top of the exit-timestamp purge
 MIN_TRADES = 30  # below this the fold is INCONCLUSIVE, per the spec
 RANDOM_SEEDS = 1000
 
@@ -65,18 +74,67 @@ def expectancy(events: list[dict]) -> float:
     return float(sum((e["net_return"] for e in events), Decimal(0)) / len(events)) * 100
 
 
-def matched_random(pool: list[dict], k: int, seeds: int = RANDOM_SEEDS) -> list[float]:
-    """Expectancy of accepting k trades at random from the same pool."""
+def matched_random(
+    pool: list[dict], accepted: list[dict], seeds: int = RANDOM_SEEDS
+) -> list[float]:
+    """Random selections matched on BOTH count and holding-time distribution.
+
+    Count-only matching lets the null differ from the model in average
+    exposure, so a duration-biased selection could beat it for reasons
+    unrelated to skill. Here the pool is bucketed by holding-time quartile and
+    each draw takes the same number from each bucket as the model did, making
+    exposure comparable by construction.
+    """
+    cuts = sorted(e["hold_hours"] for e in pool)
+    q = [cuts[int(len(cuts) * f)] for f in (0.25, 0.5, 0.75)]
+
+    def bucket(e: dict) -> int:
+        h = e["hold_hours"]
+        return 0 if h <= q[0] else 1 if h <= q[1] else 2 if h <= q[2] else 3
+
+    by_bucket: dict[int, list[dict]] = {0: [], 1: [], 2: [], 3: []}
+    for e in pool:
+        by_bucket[bucket(e)].append(e)
+    want: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+    for e in accepted:
+        want[bucket(e)] += 1
+
     out = []
     for s in range(seeds):
         rng = random.Random(s)
-        out.append(expectancy(rng.sample(pool, k)))
+        draw: list[dict] = []
+        for b, n_want in want.items():
+            avail = by_bucket[b]
+            draw.extend(rng.sample(avail, min(n_want, len(avail))))
+        if draw:
+            out.append(expectancy(draw))
     return sorted(out)
 
 
 def percentile_of(value: float, dist: list[float]) -> float:
     below = sum(1 for d in dist if d < value)
     return 100.0 * below / len(dist)
+
+
+def time_series_oof(model_factory, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Out-of-fold probabilities under TimeSeriesSplit.
+
+    cross_val_predict refuses TimeSeriesSplit because it is not a partition:
+    the earliest block is only ever training data, so those rows never receive
+    an out-of-fold prediction. That is inherent to honest time-series CV, so
+    the threshold is chosen on the subset that DOES get one, and the indices
+    are returned alongside so the caller can align its events.
+    """
+    idx_out: list[int] = []
+    prob_out: list[float] = []
+    for tr_i, te_i in TimeSeriesSplit(n_splits=3).split(x):
+        if len(np.unique(y[tr_i])) < 2:
+            continue  # a single-class training block cannot fit a classifier
+        m = model_factory()
+        m.fit(x[tr_i], y[tr_i])
+        prob_out.extend(m.predict_proba(x[te_i])[:, 1])
+        idx_out.extend(te_i)
+    return np.array(idx_out, dtype=int), np.array(prob_out, dtype=float)
 
 
 def pick_threshold(probs: np.ndarray, evs: list[dict]) -> float:
@@ -99,7 +157,8 @@ def make_model(kind: str):
         base = HistGradientBoostingClassifier(
             max_depth=3, max_iter=150, learning_rate=0.05, min_samples_leaf=40
         )
-    return CalibratedClassifierCV(base, method="isotonic", cv=3)
+    # TimeSeriesSplit, not KFold: calibration must not learn from the future
+    return CalibratedClassifierCV(base, method="isotonic", cv=TimeSeriesSplit(n_splits=3))
 
 
 def main() -> int:
@@ -129,23 +188,46 @@ def main() -> int:
     y_all = np.array(y_all, dtype=int)
     years = np.array([e["entry_time"].year for e in kept])
 
-    assert years.max() >= SEALED_FROM, "expected sealed years present in the raw pool"
-
     label = "COST-STRESSED (2x fees/spread/slippage)" if args.stress else "baseline costs"
     print("=" * 78)
     print(f"STEP 2 — walk-forward EMA meta-label  [{label}]")
     print("=" * 78)
+    # Everything from OBSERVED_THROUGH+1 is DROPPED here. It is burned, not
+    # sealed (see research_spec.yaml holdout block) — so it must not be
+    # loaded, and no statistic over it may be printed. Previously this code
+    # asserted the later years were PRESENT and printed a positive rate across
+    # them, which is the opposite of holding them out.
+    in_scope = years <= OBSERVED_THROUGH
+    dropped = int((~in_scope).sum())
+    X_all, y_all = X_all[in_scope], y_all[in_scope]  # noqa: N806
+    kept = [e for e, m in zip(kept, in_scope, strict=True) if m]
+    years = years[in_scope]
+    exits = [e["entry_time"] + timedelta(hours=e["hold_hours"]) for e in kept]
+
     print(
-        f"features {len(FEATURE_NAMES)}   usable events {len(kept)}   "
+        f"features {len(FEATURE_NAMES)}   in-scope events {len(kept)}   "
         f"base positive rate {100 * y_all.mean():.1f}%"
     )
-    print(f"final test {SEALED_FROM}+ is SEALED and not evaluated here\n")
+    print(
+        f"post-{OBSERVED_THROUGH} events excluded: {dropped}  "
+        f"(burned period — no statistic over it is reported)\n"
+    )
 
     results = []
     for (t0, t1), v in FOLDS:
-        tr = (years >= t0) & (years <= t1)
         va = years == v
-        assert v < SEALED_FROM, "fold would touch the sealed test set"
+        # PURGE: a train event whose position was still open into the
+        # validation fold (or within the embargo before it) shares outcome
+        # information with it and must be dropped. Splitting on entry year
+        # alone — the previous behaviour — leaks those labels.
+        fold_start = datetime(v, 1, 1, tzinfo=UTC)
+        embargo_edge = fold_start - timedelta(hours=EMBARGO_HOURS)
+        tr = np.array(
+            [(t0 <= yr <= t1) and (ex <= embargo_edge) for yr, ex in zip(years, exits, strict=True)]
+        )
+        purged = int(((years >= t0) & (years <= t1)).sum() - tr.sum())
+        if purged:
+            print(f"    [purge] {purged} train label(s) overlapped validate {v}")
         if tr.sum() < 100 or va.sum() < MIN_TRADES:
             print(f"fold train {t0}-{t1} -> {v}: insufficient data")
             continue
@@ -158,11 +240,14 @@ def main() -> int:
         )
 
         for kind in ("logistic_regression", "hist_gradient_boosting"):
-            model = make_model(kind)
             train_events = [e for e, m in zip(kept, tr, strict=True) if m]
-            oof = cross_val_predict(model, X_all[tr], y_all[tr], cv=3, method="predict_proba")[:, 1]
-            thr = pick_threshold(oof, train_events)
+            oof_idx, oof = time_series_oof(lambda k=kind: make_model(k), X_all[tr], y_all[tr])
+            if len(oof_idx) < MIN_TRADES:
+                print(f"    {kind:<24} insufficient out-of-fold sample for a threshold")
+                continue
+            thr = pick_threshold(oof, [train_events[i] for i in oof_idx])
 
+            model = make_model(kind)
             model.fit(X_all[tr], y_all[tr])
             p_val = model.predict_proba(X_all[va])[:, 1]
             accepted = [e for p, e in zip(p_val, val_events, strict=True) if p >= thr]
@@ -184,7 +269,7 @@ def main() -> int:
                 continue
 
             exp = expectancy(accepted)
-            dist = matched_random(val_events, len(accepted))
+            dist = matched_random(val_events, accepted)
             pctile = percentile_of(exp, dist)
             print(
                 f"    {kind:<24} thr={thr:.2f}  accepted={len(accepted):>3}  "
@@ -235,21 +320,19 @@ def main() -> int:
         print("Still NOT promotable: the sealed 2025-2026 test has not been run, and")
         print("per the spec it may be run ONCE, only after selection is frozen.")
 
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER.open("a", encoding="utf-8") as fh:
-        fh.write(
-            json.dumps(
-                {
-                    "experiment": "step2_walkforward",
-                    "ran_at": datetime.now(UTC).isoformat(),
-                    "cost_mode": "stressed" if args.stress else "baseline",
-                    "features": FEATURE_NAMES,
-                    "folds": [{"train": list(t), "validate": v} for t, v in FOLDS],
-                    "results": results,
-                }
-            )
-            + "\n"
-        )
+    provenance_append(
+        {
+            "experiment": "step2_walkforward",
+            "cost_mode": "stressed" if args.stress else "baseline",
+            "features": FEATURE_NAMES,
+            "folds": [{"train": list(t), "validate": v} for t, v in FOLDS],
+            "purge": {"by": "exit_timestamp", "embargo_hours": EMBARGO_HOURS},
+            "internal_cv": "TimeSeriesSplit(3)",
+            "benchmark": "count+duration-matched random, 1000 seeds",
+            "scope": f"events through {OBSERVED_THROUGH}; later years burned and excluded",
+            "results": results,
+        }
+    )
     print(f"\nlogged to {LEDGER}")
     return 0
 

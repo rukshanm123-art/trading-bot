@@ -31,6 +31,7 @@ htmlcov/
 .build_info.json
 
 # research: downloaded archives + derived datasets (reproducible, not source)
-research/data/
+# Bulk downloaded candles are reproducible from the manifest; the MANIFEST
+# and the experiment ledger are evidence and MUST be committed.
+research/data/*.csv
 
-research/experiments.jsonl
