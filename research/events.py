@@ -71,11 +71,41 @@ def load_candles() -> list[dict]:
     return rows
 
 
-def build_events(candles: list[dict], spec: dict) -> tuple[list[dict], int]:
+def atr_series(candles: list[dict], period: int = 14) -> list[Decimal | None]:
+    """Wilder-style ATR aligned to candles (None until warmed up).
+
+    True range uses the previous close, so atr[i] is fully known at the close
+    of candle i — safe to use for a decision made on that bar.
+    """
+    trs: list[Decimal] = [candles[0]["h"] - candles[0]["low"]]
+    for i in range(1, len(candles)):
+        prev_close = candles[i - 1]["c"]
+        hi, lo = candles[i]["h"], candles[i]["low"]
+        trs.append(max(hi - lo, abs(hi - prev_close), abs(lo - prev_close)))
+    out: list[Decimal | None] = [None] * len(candles)
+    if len(trs) < period:
+        return out
+    running = sum(trs[:period], Decimal(0)) / Decimal(period)
+    out[period - 1] = running
+    for i in range(period, len(trs)):
+        running = (running * Decimal(period - 1) + trs[i]) / Decimal(period)
+        out[i] = running
+    return out
+
+
+def build_events(
+    candles: list[dict],
+    spec: dict,
+    stop_pct_at=None,
+) -> tuple[list[dict], int]:
     """Return (events, discarded_for_gap).
 
     Each event carries signal_idx (the last CLOSED candle at decision time —
     the only bar features may use) and entry_idx (the fill bar).
+
+    ``stop_pct_at``: optional callable(signal_idx) -> Decimal stop percentage,
+    for testing volatility-scaled stops. Defaults to the flat stop_loss_pct in
+    the spec. Returning None skips the event (e.g. ATR not warmed up).
     """
     fast_n, slow_n = int(spec["fast"]), int(spec["slow"])
     stop_pct = Decimal(spec["stop_loss_pct"])
@@ -114,7 +144,11 @@ def build_events(candles: list[dict], spec: dict) -> tuple[list[dict], int]:
 
         entry_idx = i + 1
         eff_entry = candles[entry_idx]["o"] * (Decimal(1) + entry_cost)
-        stop_price = eff_entry * (Decimal(1) - stop_pct / Decimal(100))
+        this_stop_pct = stop_pct if stop_pct_at is None else stop_pct_at(i)
+        if this_stop_pct is None or this_stop_pct <= 0:
+            i += 1
+            continue
+        stop_price = eff_entry * (Decimal(1) - this_stop_pct / Decimal(100))
 
         exit_idx, exit_px, reason = None, None, None
         j = entry_idx
@@ -145,6 +179,7 @@ def build_events(candles: list[dict], spec: dict) -> tuple[list[dict], int]:
                 "signal_idx": i,
                 "entry_idx": entry_idx,
                 "entry_time": candles[entry_idx]["t"],
+                "stop_pct": this_stop_pct,
                 "hold_hours": exit_idx - entry_idx,
                 "exit_reason": reason,
                 "net_return": net,

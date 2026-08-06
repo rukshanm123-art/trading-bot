@@ -1,0 +1,5 @@
+# Research-only dependencies. DELIBERATELY separate from requirements.txt:
+# these never enter the trading image, and the engine never imports research
+# code. Install with:  .venv/bin/pip install -r research/requirements-research.txt
+numpy==2.2.1
+scikit-learn==1.6.1
