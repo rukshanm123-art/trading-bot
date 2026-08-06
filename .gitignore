@@ -32,3 +32,5 @@ htmlcov/
 
 # research: downloaded archives + derived datasets (reproducible, not source)
 research/data/
+
+research/experiments.jsonl
