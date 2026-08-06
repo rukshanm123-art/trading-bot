@@ -5,7 +5,12 @@
 # =====================================================================
 mode: testnet
 symbol: BTCUSDT
-interval: 1h
+# Testnet uses a SHORTER interval than paper/live (1h) on purpose: Binance
+# testnet periodically resets and wipes kline history, leaving too few 1h
+# candles for the EMA lookback (needs ~28). 5m always has plenty (~2h of
+# history is enough), recovers within ~2h of a reset instead of ~28h, and
+# generates far more entries/exits/brake events to exercise in the drills.
+interval: 5m
 timezone: Pacific/Auckland
 
 db:
