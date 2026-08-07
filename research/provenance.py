@@ -40,9 +40,19 @@ def _git() -> dict:
         except Exception:  # pragma: no cover - provenance must never crash a run
             return ""
 
+    # "Dirty" must mean the SOURCE differs from the commit. The ledger and the
+    # derived data are outputs being written by this very run, so counting them
+    # would make a clean regeneration permanently un-provable.
+    outputs = ("research/experiments.jsonl", "research/data/")
+    changed = [
+        line
+        for line in run("status", "--porcelain").splitlines()
+        if line.strip() and not any(o in line for o in outputs)
+    ]
     return {
         "git_commit": run("rev-parse", "HEAD"),
-        "git_dirty": bool(run("status", "--porcelain")),
+        "git_dirty": bool(changed),
+        "git_dirty_paths": [c[3:] for c in changed[:10]],
     }
 
 
@@ -63,8 +73,17 @@ def data_manifest() -> dict:
 
 
 def provenance() -> dict:
-    """Everything needed to reproduce a result, or to prove it was not edited."""
+    """Everything needed to reproduce a result, or to prove it was not edited.
+
+    ``script_sha256`` hashes the entry point that actually ran, so a clean Git
+    SHA is not the only evidence of which bytes executed.
+    """
+    import __main__
+
+    script = getattr(__main__, "__file__", None)
     return {
+        "script": Path(script).name if script else "",
+        "script_sha256": _sha256_file(Path(script)) if script else "",
         "spec_sha256": _sha256_file(ROOT / "research" / "research_spec.yaml"),
         "events_sha256": _sha256_file(ROOT / "research" / "events.py"),
         "features_sha256": _sha256_file(ROOT / "research" / "features.py"),
