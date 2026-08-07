@@ -1,9 +1,16 @@
-"""Immutable provenance for every research result.
+"""Tamper-EVIDENT provenance for every research result.
 
 research_spec.yaml promises that each ledger entry carries the spec, data,
 feature-set and Git hashes. It previously did not, and the ledger itself was
 gitignored — so a published conclusion could not be tied to the bytes that
 produced it. This module supplies those hashes and the ledger writer.
+
+TAMPER-EVIDENT, NOT IMMUTABLE. Hashes let a reader DETECT that a record or its
+inputs were altered; they do not prevent it. Anyone who can write to the repo
+can rewrite both a record and the file it attests. Genuine immutability needs
+signed tags, branch protection, or write-once external storage — none of which
+is in place here. This mirrors the wording already used for the trading audit
+log in docs/SECURITY.md.
 
 A result without provenance is an anecdote. Archived negative results matter
 as much as positive ones: they are what stops the same dead end being
@@ -40,14 +47,17 @@ def _git() -> dict:
         except Exception:  # pragma: no cover - provenance must never crash a run
             return ""
 
-    # "Dirty" must mean the SOURCE differs from the commit. The ledger and the
-    # derived data are outputs being written by this very run, so counting them
-    # would make a clean regeneration permanently un-provable.
-    outputs = ("research/experiments.jsonl", "research/data/")
+    # Only the LEDGER is excluded: it is the file this very call is appending
+    # to, so counting it would make a clean regeneration permanently
+    # un-provable. Nothing else gets a pass. In particular the tracked evidence
+    # under research/data/ (the manifest and step0_events.json) MUST make a run
+    # dirty if it has been modified — excluding the whole directory, as an
+    # earlier version did, would have hidden exactly the tampering these hashes
+    # exist to expose. The bulk CSV is gitignored and so never appears here.
     changed = [
         line
         for line in run("status", "--porcelain").splitlines()
-        if line.strip() and not any(o in line for o in outputs)
+        if line.strip() and "research/experiments.jsonl" not in line
     ]
     return {
         "git_commit": run("rev-parse", "HEAD"),
@@ -56,16 +66,48 @@ def _git() -> dict:
     }
 
 
+class DataIntegrityError(RuntimeError):
+    """The dataset on disk is not the one the manifest attests to."""
+
+
 def data_manifest() -> dict:
+    """Manifest facts, with the dataset hash RECOMPUTED and cross-checked.
+
+    Copying ``data_sha256`` out of the manifest only proves the manifest is
+    self-consistent: swap the CSV and the manifest still cheerfully asserts the
+    old hash, so every ledger entry would inherit a false attestation. The hash
+    is therefore computed from the CSV bytes here and compared, and a mismatch
+    is FATAL — a result must not be recorded against data that is not the data
+    it claims.
+    """
     path = ROOT / "research" / "data" / "BTCUSDT-1h.manifest.json"
+    csv_path = ROOT / "research" / "data" / "BTCUSDT-1h.csv"
     if not path.exists():
         return {}
     try:
         m = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+    recorded = str(m.get("data_sha256", ""))
+    if csv_path.exists():
+        actual = _sha256_file(csv_path)
+        if recorded and actual != recorded:
+            raise DataIntegrityError(
+                f"{csv_path.name} does not match its manifest.\n"
+                f"  manifest: {recorded}\n"
+                f"  on disk : {actual}\n"
+                "Re-run research/import_binance.py, or restore the archive. "
+                "Refusing to stamp a result against unverified data."
+            )
+        verified = True
+    else:
+        # A fresh clone has the manifest (tracked) but not the bulk CSV.
+        actual, verified = recorded, False
+
     return {
-        "data_sha256": m.get("data_sha256", ""),
+        "data_sha256": actual,
+        "data_sha256_verified": verified,
         "data_rows": m.get("rows"),
         "data_range": [m.get("first_open_time"), m.get("last_open_time")],
         "data_gaps": m.get("gap_count"),

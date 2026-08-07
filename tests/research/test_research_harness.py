@@ -180,3 +180,68 @@ def test_ledger_hashes_match_the_current_files():
                 f"{row['experiment']}: {key} does not match the current file — "
                 "the archived result predates an edit and must be regenerated"
             )
+
+
+def test_dirty_check_counts_tracked_evidence_but_not_the_ledger(monkeypatch):
+    """The ledger is exempt (it is being appended); evidence files are NOT.
+
+    Excluding all of research/data/ — as an earlier version did — would have
+    hidden modification of the manifest and step0_events.json, which are
+    exactly the artefacts these hashes exist to protect.
+    """
+    import provenance as prov_mod
+
+    statuses = {
+        " M research/experiments.jsonl": False,  # exempt: self-referential
+        " M research/data/BTCUSDT-1h.manifest.json": True,  # tracked evidence
+        " M research/data/step0_events.json": True,  # tracked evidence
+        " M research/events.py": True,  # source
+    }
+    for line, should_be_dirty in statuses.items():
+        monkeypatch.setattr(
+            prov_mod.subprocess,
+            "run",
+            lambda *a, _line=line, **k: type("R", (), {"stdout": _line, "returncode": 0})(),
+        )
+        assert (
+            prov_mod._git()["git_dirty"] is should_be_dirty
+        ), f"{line!r} should {'' if should_be_dirty else 'not '}mark the run dirty"
+
+
+def test_manifest_hash_is_recomputed_not_trusted(tmp_path, monkeypatch):
+    """A swapped CSV must be detected, not inherited as a false attestation."""
+    import provenance as prov_mod
+
+    data_dir = tmp_path / "research" / "data"
+    data_dir.mkdir(parents=True)
+    csv_path = data_dir / "BTCUSDT-1h.csv"
+    csv_path.write_text("open_time,open\n2024-01-01T00:00:00+00:00,100\n", encoding="utf-8")
+
+    real = prov_mod._sha256_file(csv_path)
+    manifest = data_dir / "BTCUSDT-1h.manifest.json"
+    manifest.write_text(json.dumps({"data_sha256": real, "rows": 1}), encoding="utf-8")
+    monkeypatch.setattr(prov_mod, "ROOT", tmp_path)
+
+    ok = prov_mod.data_manifest()
+    assert ok["data_sha256"] == real and ok["data_sha256_verified"] is True
+
+    # Swap the data, leave the manifest asserting the old hash.
+    csv_path.write_text("open_time,open\n2024-01-01T00:00:00+00:00,999999\n", encoding="utf-8")
+    with pytest.raises(prov_mod.DataIntegrityError, match="does not match its manifest"):
+        prov_mod.data_manifest()
+
+
+def test_missing_csv_is_reported_unverified_not_fabricated(tmp_path, monkeypatch):
+    """A fresh clone has the manifest but not the bulk CSV; say so honestly."""
+    import provenance as prov_mod
+
+    data_dir = tmp_path / "research" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "BTCUSDT-1h.manifest.json").write_text(
+        json.dumps({"data_sha256": "a" * 64, "rows": 10}), encoding="utf-8"
+    )
+    monkeypatch.setattr(prov_mod, "ROOT", tmp_path)
+
+    got = prov_mod.data_manifest()
+    assert got["data_sha256"] == "a" * 64
+    assert got["data_sha256_verified"] is False
