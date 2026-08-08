@@ -150,13 +150,23 @@ Last decision:       {(last_decision['ts'] + ' ' + str(last_decision['signal_act
 def cmd_stop(args) -> int:
     cfg, db, repos = _load(args)
     kill = KillSwitch(repos)
-    kill.activate(KillSwitchSource.CLI, args.reason or f"manual stop by {_actor()}")
+    file_written = kill.activate(KillSwitchSource.CLI, args.reason or f"manual stop by {_actor()}")
     AuditLog(db).append("cli.stop", {"actor": _actor(), "reason": args.reason or ""})
-    print(
-        "kill switch ACTIVATED. New entries are blocked in every mode.\n"
-        f"A {C.STOP_FILE_NAME} file was also created as an independent backstop.\n"
-        "Reset with: python -m trading_bot resume --note '<why>'"
-    )
+    print("kill switch ACTIVATED. New entries are blocked in every mode.")
+    # Report the file backstop HONESTLY. It cannot be written on a read-only
+    # rootfs (the hardened container default), and an operator who believes a
+    # second independent halt exists may rely on it during an incident.
+    if file_written:
+        print(f"A {C.STOP_FILE_NAME} file was also created as an independent backstop.")
+    else:
+        print(
+            f"WARNING: the {C.STOP_FILE_NAME} backstop could NOT be written "
+            "(read-only filesystem?).\n"
+            "         The halt is active via the database flag only. To add a "
+            "second independent\n"
+            "         halt, set TRADING_KILL_SWITCH=true in the environment and restart."
+        )
+    print("Reset with: python -m trading_bot resume --note '<why>'")
     return 0
 
 

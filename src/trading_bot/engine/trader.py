@@ -246,7 +246,8 @@ class TradingEngine:
         self._stop = threading.Event()
         self._last_candle_ts: datetime | None = None
         self._db_ok = True
-        self._kill_policy_done = False
+        self._kill_policy_done = False  # emergency position policy applied once
+        self._kill_notified = False  # operator alerted once per halt episode
         self._shutdown_done = False
         self._native_stops = cfg.execution.use_native_stops
         self._breach_cycles = 0
@@ -542,6 +543,17 @@ class TradingEngine:
         base_free_qty = base_free.free if base_free else ZERO
         quote_free_qty = quote_free.free if quote_free else ZERO
 
+        # ---- kill-switch alert: fires on ANY activation, position or not.
+        # This was previously nested inside the `position is not None` branch
+        # below, which made a halt with NO open position completely silent: the
+        # circuit breaker could latch at 3am and the operator would learn about
+        # it only by looking. That happened for real (testnet reset, 2026-08-05
+        # — the bot sat halted ~11h while flat, with no alert). A halt is a
+        # critical operational event whether or not money is currently exposed.
+        if kill_active and not self._kill_notified:
+            self._kill_notified = True
+            self._notify_kill(kill_reason, position)
+
         # ---- exit management (every cycle, kill switch included) --------
         if position is not None and self._native_stops:
             # first, learn whether the resting native stop already acted
@@ -552,7 +564,6 @@ class TradingEngine:
                 if self.cfg.emergency_position_policy == EmergencyPositionPolicy.CLOSE_AT_MARKET:
                     exit_reason = "kill_switch_close_policy"
                 self._kill_policy_done = True
-                self._notify_kill(kill_reason, position)
             if not exit_reason:
                 exit_reason = check_protective_exit(position, quote)
             if (
@@ -587,6 +598,7 @@ class TradingEngine:
             self._breach_cycles = 0
         if not kill_active:
             self._kill_policy_done = False
+            self._kill_notified = False
 
         # ---- strategy pipeline: once per NEW closed candle ---------------
         if signal_candles and cval.ok:

@@ -131,3 +131,44 @@ When every box above is checked and recorded on `LIVE_TRADING_CHECKLIST.md`,
 **and** the paper 30-day gate has cleared, you have the behavioural evidence
 the live decision needs. Testnet passing is necessary, not sufficient — the
 full live gate and unlock ceremony still stand between here and real funds.
+
+
+---
+
+## Drill run 1 — 2026-08-08 (testnet 161.33.237.78)
+
+Baseline before: equity 74097.01788450, flat, unknown orders 0, reconciliation
+OK, 5 trades / 1 win. Every drill's state change was reverted afterwards.
+
+| Drill | Result | Evidence |
+|---|---|---|
+| A1 restart / crash recovery | PASS | lock reacquired 23:51:17, startup reconciliation OK, equity byte-identical |
+| A2 kill switch (CLI) | PASS + 2 defects found | halt active `cli:drill A2`, engine stayed healthy |
+| A2 resume | PASS | halt cleared, engine resumed, equity unchanged |
+| A3 kill switch (env) | PASS | `env:TRADING_KILL_SWITCH=true`; **`resume` correctly REFUSED to clear it** and reported the blocker |
+| A4 exchange unavailable | PASS | `cycle skipped, exchange unavailable (ConnectionError)`, process did NOT crash, decisions resumed 00:45:23 after reconnect, breaker did not false-trip on ~100 s |
+| A5 reconciliation / unknown orders | PASS | `Unknown orders: 0`, reconciliation OK |
+| C alert channel | PASS | `[SENT] telegram` |
+
+### Defects found (both fixed, both with regression tests)
+
+1. **False backstop claim.** `stop` printed "a STOP_TRADING file was also
+   created as an independent backstop" when the read-only rootfs had blocked
+   the write — `activate()` swallowed the OSError into a log line the operator
+   never sees. An operator would believe two independent halts existed when
+   there was one. `activate()` now returns whether the file was written and the
+   CLI warns, pointing at the `TRADING_KILL_SWITCH` env alternative.
+
+2. **Silent halt (more serious).** The kill-switch alert sat INSIDE the
+   `position is not None` branch, so halting while flat notified nobody. Not
+   hypothetical: the 2026-08-05 testnet reset tripped the circuit breaker while
+   the bot was flat and it sat halted ~11 h, discovered only by looking. The
+   alert now fires on any halt, with a separate flag so the emergency position
+   policy still applies once per episode.
+
+### Not yet covered
+
+- [ ] **A1 with an OPEN POSITION** — needs a live position; confirm the
+      position and its resting stop survive a restart.
+- [ ] **Section B brake engagement** — daily-loss, consecutive-loss and
+      drawdown brakes need losing trades to accumulate (5 trades so far).

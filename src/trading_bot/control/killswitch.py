@@ -68,15 +68,27 @@ class KillSwitch:
         return False, ""
 
     # ------------------------------------------------------------------
-    def activate(self, source: KillSwitchSource, reason: str) -> None:
+    def activate(self, source: KillSwitchSource, reason: str) -> bool:
+        """Halt trading. Returns whether the FILE backstop was also written.
+
+        The DB flag is authoritative and is set first. The file is a secondary,
+        independent backstop for when the database or CLI is unavailable — but
+        it cannot be written on a read-only rootfs, which is exactly what the
+        hardened container images use. Callers must surface that: telling an
+        operator a backstop exists when it does not is worse than not having
+        it, because it is relied on during an incident.
+        """
         payload = json.dumps({"active": True, "source": source.value, "reason": reason})
         self.repos.flags.set(self.repos.flags.KILL_SWITCH, payload)
+        file_written = True
         try:
             self.stop_file.write_text(f"{source.value}: {reason}\n", encoding="utf-8")
         except OSError as exc:
+            file_written = False
             log.error("could not write %s: %s", self.stop_file, exc)
         self.repos.events.killswitch(source.value, True, reason)
         log.critical("KILL SWITCH ACTIVATED (%s): %s", source.value, reason)
+        return file_written
 
     def reset(self, actor: str, note: str = "") -> list[str]:
         """Manual reset. Returns a list of blockers that could NOT be cleared."""

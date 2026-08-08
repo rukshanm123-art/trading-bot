@@ -175,3 +175,33 @@ def test_live_startup_independently_refuses_non_postgres_database():
     engine.db = SimpleNamespace(backend="sqlite")
     with pytest.raises(RuntimeError, match="active PostgreSQL"):
         engine.startup_checks()
+
+
+def test_kill_switch_alerts_even_with_no_open_position(tmp_path, monkeypatch):
+    """Found by testnet drill A2/A3 (2026-08-08).
+
+    The kill-switch alert used to sit INSIDE the `position is not None` branch,
+    so a halt while flat was completely silent — no Telegram, no critical
+    event. That is not hypothetical: when the Binance testnet reset tripped the
+    circuit breaker on 2026-08-05 the bot was flat, sat halted for ~11 hours,
+    and the operator learned about it only by looking. A halt is a critical
+    operational event whether or not money is currently exposed.
+    """
+    from trading_bot.control.killswitch import KillSwitch, KillSwitchSource
+
+    rows = make_trend_rows([(40, 0.0)], start_price=100.0)
+    engine = _fixture_engine(tmp_path, rows)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        engine.hub, "send", lambda subject, body, severity="info": sent.append((subject, severity))
+    )
+
+    KillSwitch(engine.repos).activate(KillSwitchSource.CLI, "drill: halted while flat")
+    assert engine.portfolio.open_position() is None, "precondition: no position"
+
+    engine.run(max_cycles=3)
+    engine.db.close()
+
+    kill_alerts = [s for s in sent if "KILL SWITCH" in s[0].upper()]
+    assert kill_alerts, "a halt with no open position must still alert the operator"
+    assert kill_alerts[0][1] == "critical"

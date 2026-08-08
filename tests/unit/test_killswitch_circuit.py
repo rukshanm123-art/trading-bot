@@ -179,3 +179,35 @@ def test_circuit_hard_trip_counter_resets_when_healthy(repos, tmp_path):
     cb.evaluate(bad, 0, True)
     cb.evaluate(bad, 0, True)
     assert not cb.kill_switch.check()[0]  # never reached 3 consecutive
+
+
+def test_activate_reports_when_the_file_backstop_could_not_be_written(repos, tmp_path):
+    """Found by testnet drill A2 (2026-08-08).
+
+    The hardened container runs a READ-ONLY rootfs, so the STOP_TRADING file
+    can never be written there — yet `stop` printed "a STOP_TRADING file was
+    also created as an independent backstop" unconditionally, because
+    activate() swallowed the OSError into a log line the operator never sees.
+    An operator who believes a second independent halt exists may rely on it
+    during an incident. activate() now reports whether the file was written.
+    """
+    from trading_bot.control.killswitch import KillSwitch, KillSwitchSource
+
+    ok_dir = tmp_path / "writable"
+    ok_dir.mkdir()
+    kill = KillSwitch(repos, stop_file_dir=ok_dir)
+    assert kill.activate(KillSwitchSource.CLI, "writable") is True
+    assert (ok_dir / "STOP_TRADING").exists()
+
+    # A directory that cannot be written to stands in for the read-only rootfs.
+    blocked = tmp_path / "readonly"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    try:
+        kill2 = KillSwitch(repos, stop_file_dir=blocked)
+        assert kill2.activate(KillSwitchSource.CLI, "read-only") is False
+        # The DB flag is authoritative and MUST still halt trading.
+        active, reason = kill2.check()
+        assert active and "read-only" in reason
+    finally:
+        blocked.chmod(0o700)
