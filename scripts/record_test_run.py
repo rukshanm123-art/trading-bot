@@ -89,14 +89,23 @@ def _tool_version(cmd: list[str]) -> str:
     return out[0] if out else "unknown"
 
 
-def collect_test_ids() -> list[str]:
-    # -o addopts= neutralises the project-level "-q" so node ids are printed
-    proc = run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-o", "addopts=", "tests"])
-    ids = [
-        line.strip()
-        for line in proc.stdout.splitlines()
-        if "::" in line and not line.startswith(("=", "warning"))
-    ]
+def test_ids_from_junit(path: Path) -> list[str]:
+    """Recover the tests pytest actually ran from its durable JUnit output.
+
+    A separate ``pytest --collect-only`` pass duplicated expensive discovery
+    and could time out before the real suite, falsely recording zero tests even
+    when the completed JUnit report proved hundreds had run.
+    """
+    if not path.exists():
+        return []
+    root = ET.parse(path).getroot()  # nosec - generated locally by pytest
+    ids: list[str] = []
+    for case in root.iter("testcase"):
+        classname = case.get("classname", "").strip()
+        name = case.get("name", "").strip()
+        if not classname or not name:
+            continue
+        ids.append(f"{classname.replace('.', '/')}.py::{name}")
     return ids
 
 
@@ -113,13 +122,10 @@ def main() -> int:
     global _deadline
     _deadline = time.monotonic() + QUALITY_DEADLINE_S
     QUALITY_DIR.mkdir(parents=True, exist_ok=True)
-
-    collected_ids = collect_test_ids()
-    missing_safety = [
-        req
-        for req in C.REQUIRED_SAFETY_TESTS
-        if not any(req in tid or tid in req for tid in collected_ids)
-    ]
+    # Never let a timed-out phase inherit an earlier run's apparently valid
+    # evidence files.
+    JUNIT.unlink(missing_ok=True)
+    COV_JSON.unlink(missing_ok=True)
 
     format_proc = run([tool("ruff"), "format", "--check", "src", "tests", "scripts"])
     lint_proc = run([tool("ruff"), "check", "src", "tests", "scripts"])
@@ -153,6 +159,13 @@ def main() -> int:
             tests_errors = int(node.get("errors", 0))
             tests_skipped = int(node.get("skipped", 0))
 
+    collected_ids = test_ids_from_junit(JUNIT)
+    missing_safety = [
+        req
+        for req in C.REQUIRED_SAFETY_TESTS
+        if not any(req in tid or tid in req for tid in collected_ids)
+    ]
+
     coverage_percent = 0.0
     if COV_JSON.exists():
         cov = json.loads(COV_JSON.read_text(encoding="utf-8"))
@@ -163,8 +176,20 @@ def main() -> int:
     hashes = expected_hashes(ROOT)
 
     tests_passed = tests_run - tests_failed - tests_errors - tests_skipped
+    gate_ok = (
+        proc.returncode == 0
+        and tests_failed == 0
+        and tests_errors == 0
+        and len(collected_ids) >= C.QUALITY_MIN_TESTS
+        and coverage_percent >= C.QUALITY_MIN_COVERAGE_PCT
+        and not missing_safety
+        and format_proc.returncode == 0
+        and lint_proc.returncode == 0
+        and type_proc.returncode == 0
+        and security_proc.returncode == 0
+    )
     record = {
-        "passed": proc.returncode == 0 and tests_failed == 0 and tests_errors == 0,
+        "passed": gate_ok,
         "tests_collected": len(collected_ids),
         "tests_run": tests_run,
         "tests_passed": tests_passed,
@@ -202,16 +227,6 @@ def main() -> int:
     print(f"\nquality record -> {out}")
     print(json.dumps({k: v for k, v in record.items() if k != "required_safety_tests"}, indent=2))
 
-    gate_ok = (
-        record["passed"]
-        and record["tests_collected"] >= C.QUALITY_MIN_TESTS
-        and record["coverage_percent"] >= C.QUALITY_MIN_COVERAGE_PCT
-        and not missing_safety
-        and format_proc.returncode == 0
-        and lint_proc.returncode == 0
-        and type_proc.returncode == 0
-        and security_proc.returncode == 0
-    )
     print(f"\nquality gate: {'PASS' if gate_ok else 'FAIL'}")
     return 0 if gate_ok else 1
 

@@ -154,3 +154,24 @@ def test_quality_runner_converts_timeout_to_failure(monkeypatch):
     result = namespace["run"](["stuck-command"], timeout_s=1)
     assert result.returncode == 124
     assert "timed out" in result.stderr
+
+
+def test_quality_runner_reads_executed_ids_from_junit(tmp_path):
+    import runpy
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "record_test_run.py"
+    namespace = runpy.run_path(str(script), run_name="quality_runner_test")
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0"?><testsuites><testsuite tests="2">'
+        '<testcase classname="tests.unit.test_sizing" name="test_safe" />'
+        '<testcase classname="tests.unit.test_param" name="test_case[value]" />'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+
+    assert namespace["test_ids_from_junit"](junit) == [
+        "tests/unit/test_sizing.py::test_safe",
+        "tests/unit/test_param.py::test_case[value]",
+    ]
