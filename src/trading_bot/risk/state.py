@@ -14,6 +14,7 @@ from trading_bot.config.models import AppConfig
 from trading_bot.core.models import parse_iso
 from trading_bot.core.types import HUNDRED, ZERO
 from trading_bot.exchange.interface import Clock
+from trading_bot.risk.loss_pause import ConsecutiveLossPauseService
 from trading_bot.storage.repositories import Repositories
 
 
@@ -54,11 +55,18 @@ class RiskStateSnapshot:
 
 
 class RiskStateService:
-    def __init__(self, repos: Repositories, cfg: AppConfig, clock: Clock) -> None:
+    def __init__(
+        self,
+        repos: Repositories,
+        cfg: AppConfig,
+        clock: Clock,
+        loss_pause: ConsecutiveLossPauseService | None = None,
+    ) -> None:
         self.repos = repos
         self.cfg = cfg
         self.clock = clock
         self.mode = cfg.mode
+        self.loss_pause = loss_pause or ConsecutiveLossPauseService(repos, cfg, clock)
 
     def utc_day(self, now: datetime | None = None) -> str:
         return (now or self.clock.now()).strftime("%Y-%m-%d")
@@ -86,7 +94,7 @@ class RiskStateService:
         peak = max(peak, equity_now)
         drawdown_pct = (peak - equity_now) / peak * HUNDRED if peak > ZERO else ZERO
 
-        consecutive = self.repos.positions.consecutive_losses(self.mode)
+        consecutive = self.loss_pause.status().effective_streak
         cooldown_until: datetime | None = None
         last_loss = self.repos.positions.last_losing_close_time(self.mode)
         if last_loss is not None and consecutive > 0:

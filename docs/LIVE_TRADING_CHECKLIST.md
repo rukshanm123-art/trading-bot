@@ -47,6 +47,15 @@ and no automatic promotion; the engine re-verifies gates at every startup.
 
 - [ ] Testnet keys created at https://testnet.binance.vision, set as
       `BINANCE_TESTNET_*`
+- [ ] Final uninterrupted 2-week clock is tied to one deployed commit. Restart
+      it after trading-loop, risk, execution/gateway, exit-management, or
+      accounting changes; research/docs/wording/watchdog/test-only changes do
+      not reset it.
+- [x] Consecutive-loss, cooldown, and daily-entry-cap brakes engaged and
+      blocked entries for the recorded reason codes.
+- [ ] Dedicated consecutive-loss acknowledgement recovery drill passed,
+      including dust, idempotency, restart, and database restore.
+- [ ] Daily-loss and max-drawdown brakes engaged and blocked new entries.
 - [ ] Normal operation for 2+ weeks, then deliberate failure drills:
   - [ ] disconnect the network mid-session (expect EXCHANGE_UNAVAILABLE,
         no crash, entries pause)

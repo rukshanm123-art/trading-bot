@@ -91,10 +91,35 @@ switch. Residual risk remains and is accepted and documented here.
 
 ## Consecutive-loss and cooldown behaviour
 
-After each losing close: a 12 h per-symbol cooldown starts. After 3
-consecutive losses: entries stop until a winning state change or manual
-review — on the bundled 180-day bear fixture this engaged after 8 trades and
-kept the account at −2.3% while the market fell 31%.
+After each losing close, a 12 h cooldown starts and clears automatically. After
+3 consecutive losses, a separate mode-scoped brake latches and blocks entries.
+**The latched brake does not clear with time and the generic `resume` command
+cannot clear it.** This distinction is shown in status, alerts, and daily
+reports.
+
+Recovery requires a documented operator review through:
+
+```bash
+python -m trading_bot --config <same-config> risk acknowledge-loss-pause \
+  --note '<review and decision>'
+```
+
+The command refuses unless the cooldown has elapsed, there is no `open`
+position, no active or unknown order exists, reconciliation is current and OK,
+and the reconciliation block is clear. "No open position" deliberately uses
+the position status, not a zero wallet balance: a recorded, unsellable `dust`
+remainder is allowed and cannot recreate the deadlock. Successful review adds
+an append-only, mode-specific position watermark and hash-chained audit event
+in one database transaction. Retrying the same review is idempotent. The raw
+loss history remains visible, while risk evaluation starts a new effective
+streak after the watermark. A missing or inconsistent watermark fails closed.
+
+The default threshold is intentionally strict while the registered EMA
+strategy remains unpromoted. It is not a suitable generic harm measure for a
+low-win-rate trend follower: such strategies naturally produce clustered loss
+streaks. Any future strategy of that class must justify a brake based on
+drawdown or realised expectancy rather than weakening this threshold merely to
+keep trading.
 
 ## Dust
 

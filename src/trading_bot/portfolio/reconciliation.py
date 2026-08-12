@@ -184,7 +184,7 @@ class Reconciler:
         return result
 
     def _record(self, result: ReconcileResult) -> None:
-        self.repos.events.reconciliation(result.ok, result.details)
+        self.repos.events.reconciliation(result.ok, result.details, self.cfg.mode)
         flag = self.repos.flags.RECONCILIATION_BLOCK
         if result.ok:
             self.repos.flags.set(flag, "false")

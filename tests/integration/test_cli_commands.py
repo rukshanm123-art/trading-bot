@@ -1,13 +1,18 @@
 """CLI: status, stop/resume, approve, reports, audit — against a temp project."""
 
 import shutil
+from datetime import timedelta
 
 import pytest
 
 from tests.conftest import MIGRATIONS
-from tests.helpers import make_trend_rows, write_rows_csv
+from tests.helpers import T0, make_trend_rows, write_rows_csv
 from trading_bot.cli.main import main
 from trading_bot.config import constants as C
+from trading_bot.core.enums import Mode
+from trading_bot.core.types import dec
+from trading_bot.storage.db import Database
+from trading_bot.storage.repositories import Repositories
 
 pytestmark = pytest.mark.integration
 
@@ -99,3 +104,81 @@ def test_db_backup(project, tmp_path, capsys):
     rc = main(["--config", project, "db", "backup", "--out", str(tmp_path / "b.db")])
     assert rc == 0
     assert (tmp_path / "b.db").exists()
+
+
+def test_loss_pause_requires_dedicated_ack_and_status_is_explicit(project, tmp_path, capsys):
+    db = Database(f"sqlite:///{tmp_path}/cli.db")
+    db.migrate(MIGRATIONS)
+    repos = Repositories(db)
+    for index in range(3):
+        ts = T0 + timedelta(hours=index)
+        position_id = repos.positions.insert_open(
+            Mode.PAPER,
+            "BTCUSDT",
+            dec("0.00010"),
+            dec("65000"),
+            dec("63700"),
+            f"entry-loss-{index}",
+            dec("0.01"),
+            ts,
+        )
+        if index == 2:
+            repos.positions.mark_dust(
+                position_id,
+                dec("0.00000991"),
+                dec("0.001"),
+                f"exit-loss-{index}",
+                dec("0.01"),
+                dec("-1"),
+                "strategy_exit:dust_below_exchange_minimum",
+                ts + timedelta(minutes=30),
+            )
+        else:
+            repos.positions.close(
+                position_id,
+                f"exit-loss-{index}",
+                dec("0.01"),
+                dec("-1"),
+                "test",
+                ts + timedelta(minutes=30),
+            )
+    repos.events.reconciliation(True, {"drill": "loss-pause"}, Mode.PAPER)
+    db.close()
+
+    assert main(["--config", project, "status"]) == 0
+    status = capsys.readouterr().out
+    assert "ACTIVE — DOES NOT CLEAR WITH TIME" in status
+    assert "effective 3 | raw history 3" in status
+
+    assert main(["--config", project, "stop", "--reason", "combined brake drill"]) == 0
+    capsys.readouterr()
+    assert main(["--config", project, "resume", "--note", "reviewed"]) == 1
+    resume = capsys.readouterr().out
+    assert "`resume` cannot clear it" in resume
+    assert "acknowledge-loss-pause" in resume
+    assert main(["--config", project, "status"]) == 0
+    separated_status = capsys.readouterr().out
+    assert "Kill switch:         inactive" in separated_status
+    assert "Loss-streak brake:   ACTIVE" in separated_status
+
+    command = [
+        "--config",
+        project,
+        "risk",
+        "acknowledge-loss-pause",
+        "--note",
+        "loss sequence reviewed; continue testnet drill",
+    ]
+    assert main(command) == 0
+    assert "effective streak is now 0" in capsys.readouterr().out
+    assert main(command) == 0
+    assert "idempotent retry" in capsys.readouterr().out
+
+    check = Database(f"sqlite:///{tmp_path}/cli.db")
+    audit_rows = check.query(
+        "SELECT * FROM audit_log WHERE kind = 'risk.consecutive_loss_pause_acknowledged'"
+    )
+    acknowledgements = check.query("SELECT * FROM consecutive_loss_acknowledgements")
+    assert len(audit_rows) == 1
+    assert len(acknowledgements) == 1
+    check.close()

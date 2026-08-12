@@ -620,6 +620,19 @@ class PositionsRepo:
             (mode.value, limit),
         )
 
+    def get_closed(self, mode: Mode, position_id: str) -> dict[str, Any] | None:
+        return self.db.query_one(
+            "SELECT * FROM positions WHERE id = ? AND mode = ? " "AND status IN ('closed', 'dust')",
+            (position_id, mode.value),
+        )
+
+    def latest_closed(self, mode: Mode) -> dict[str, Any] | None:
+        return self.db.query_one(
+            "SELECT * FROM positions WHERE mode = ? AND status IN ('closed', 'dust') "
+            "ORDER BY closed_at DESC LIMIT 1",
+            (mode.value,),
+        )
+
     def closed_on_day(self, mode: Mode, day: str) -> list[dict[str, Any]]:
         return self.db.query(
             "SELECT * FROM positions WHERE mode = ? AND status IN ('closed', 'dust') "
@@ -648,8 +661,19 @@ class PositionsRepo:
             (mode.value, iso(start), iso(end)),
         )
 
-    def consecutive_losses(self, mode: Mode) -> int:
-        rows = self.closed_positions(mode, limit=50)
+    def consecutive_losses(self, mode: Mode, closed_after: datetime | None = None) -> int:
+        if closed_after is None:
+            rows = self.db.query(
+                "SELECT * FROM positions WHERE mode = ? AND status IN ('closed', 'dust') "
+                "ORDER BY closed_at DESC",
+                (mode.value,),
+            )
+        else:
+            rows = self.db.query(
+                "SELECT * FROM positions WHERE mode = ? AND status IN ('closed', 'dust') "
+                "AND closed_at > ? ORDER BY closed_at DESC",
+                (mode.value, iso(closed_after)),
+            )
         count = 0
         for row in rows:
             pnl = dec(row["realized_pnl"]) if row["realized_pnl"] is not None else ZERO
@@ -697,6 +721,58 @@ class PositionsRepo:
             "ORDER BY ts",
             (mode.value, iso(start), iso(end)),
         )
+
+
+class ConsecutiveLossAcknowledgementsRepo:
+    """Append-only operator review watermarks for the loss-streak brake."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def latest(self, mode: Mode) -> dict[str, Any] | None:
+        return self.db.query_one(
+            "SELECT * FROM consecutive_loss_acknowledgements WHERE mode = ? "
+            "ORDER BY watermark_closed_at DESC, acknowledged_at DESC, id DESC LIMIT 1",
+            (mode.value,),
+        )
+
+    def get_for_watermark(self, mode: Mode, position_id: str) -> dict[str, Any] | None:
+        return self.db.query_one(
+            "SELECT * FROM consecutive_loss_acknowledgements "
+            "WHERE mode = ? AND watermark_position_id = ?",
+            (mode.value, position_id),
+        )
+
+    def insert(
+        self,
+        mode: Mode,
+        watermark_position_id: str,
+        watermark_closed_at: datetime,
+        streak_count: int,
+        acknowledged_at: datetime,
+        actor: str,
+        note: str,
+    ) -> tuple[dict[str, Any], bool]:
+        inserted = self.db.execute_rowcount(
+            "INSERT INTO consecutive_loss_acknowledgements "
+            "(id, mode, watermark_position_id, watermark_closed_at, streak_count, "
+            "acknowledged_at, actor, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT DO NOTHING",
+            (
+                uid(),
+                mode.value,
+                watermark_position_id,
+                iso(watermark_closed_at),
+                streak_count,
+                iso(acknowledged_at),
+                actor,
+                note,
+            ),
+        )
+        row = self.get_for_watermark(mode, watermark_position_id)
+        if row is None:
+            raise RuntimeError("loss-pause acknowledgement was not persisted")
+        return row, inserted == 1
 
 
 class BalanceRepo:
@@ -849,14 +925,28 @@ class EventsRepo:
             (uid(), iso(utcnow()), action, hours, actor, note),
         )
 
-    def reconciliation(self, ok: bool, details: dict[str, Any]) -> None:
+    def reconciliation(self, ok: bool, details: dict[str, Any], mode: Mode | None = None) -> None:
         self.db.execute(
-            "INSERT INTO reconciliation_results (id, ts, ok, details_json) VALUES (?, ?, ?, ?)",
-            (uid(), iso(utcnow()), 1 if ok else 0, json_dumps(details)),
+            "INSERT INTO reconciliation_results (id, ts, ok, details_json, mode) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                uid(),
+                iso(utcnow()),
+                1 if ok else 0,
+                json_dumps(details),
+                mode.value if mode else None,
+            ),
         )
 
-    def last_reconciliation(self) -> dict[str, Any] | None:
-        return self.db.query_one("SELECT * FROM reconciliation_results ORDER BY ts DESC LIMIT 1")
+    def last_reconciliation(self, mode: Mode | None = None) -> dict[str, Any] | None:
+        if mode is None:
+            return self.db.query_one(
+                "SELECT * FROM reconciliation_results ORDER BY ts DESC LIMIT 1"
+            )
+        return self.db.query_one(
+            "SELECT * FROM reconciliation_results WHERE mode = ? ORDER BY ts DESC LIMIT 1",
+            (mode.value,),
+        )
 
     def api_error(self, endpoint: str, message: str) -> None:
         self.db.execute(
@@ -975,6 +1065,7 @@ class Repositories:
         self.orders = OrdersRepo(db)
         self.decisions = DecisionsRepo(db)
         self.positions = PositionsRepo(db)
+        self.loss_acknowledgements = ConsecutiveLossAcknowledgementsRepo(db)
         self.balances = BalanceRepo(db)
         self.daily_equity = DailyEquityRepo(db)
         self.reports = ReportsRepo(db)

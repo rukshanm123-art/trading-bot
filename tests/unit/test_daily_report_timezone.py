@@ -1,10 +1,11 @@
 """Daily reports use configured local-day boundaries converted to UTC."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from tests.helpers import RULES, make_config
 from trading_bot.core.enums import Mode
 from trading_bot.core.models import iso
+from trading_bot.core.types import dec
 from trading_bot.reporting.daily import DailyReportBuilder, local_day_bounds_utc
 
 
@@ -73,3 +74,39 @@ def test_auckland_daylight_saving_boundaries_are_utc_intervals():
     start, end = local_day_bounds_utc("2025-09-28", "Pacific/Auckland")
     assert start == datetime(2025, 9, 27, 12, 0, tzinfo=UTC)
     assert end == datetime(2025, 9, 28, 11, 0, tzinfo=UTC)
+
+
+def test_daily_report_surfaces_latched_loss_pause(repos):
+    cfg = make_config(timezone="Pacific/Auckland")
+    clock_now = datetime(2025, 6, 3, 18, 0, tzinfo=UTC)
+    insert_snapshot(repos, clock_now, "97", "65000")
+    for index in range(3):
+        ts = clock_now - timedelta(hours=15 - index)
+        position_id = repos.positions.insert_open(
+            Mode.PAPER,
+            "BTCUSDT",
+            dec("0.00010"),
+            dec("65000"),
+            dec("63700"),
+            f"entry-{index}",
+            dec("0.01"),
+            ts,
+        )
+        repos.positions.close(
+            position_id,
+            f"exit-{index}",
+            dec("0.01"),
+            dec("-1"),
+            "test",
+            ts + timedelta(minutes=30),
+        )
+
+    builder = DailyReportBuilder(
+        repos, cfg, RULES, clock=type("C", (), {"now": lambda self: clock_now})()
+    )
+    report, markdown = builder.build("2025-06-04", {}, False, "", False)
+
+    assert report["consecutive_loss_pause"]["active"]
+    assert report["consecutive_loss_pause"]["clears_automatically"] is False
+    assert "THIS DOES NOT CLEAR WITH TIME" in markdown
+    assert "acknowledge-loss-pause" in markdown

@@ -71,6 +71,11 @@ is optional — e.g. nightly `scripts/backup_db.sh`.
   (equity, drawdown, cycles, decisions, entries/exits, errors).
 - Alerts (console/email/telegram): risk-limit events, kill switch,
   reconciliation mismatch, exit failures, consecutive-loss pause.
+- A consecutive-loss pause is not a cooldown and never clears with time.
+  `resume` may clear the ordinary pause/kill switch but cannot clear this
+  brake. After review, use `risk acknowledge-loss-pause --note '<decision>'`;
+  the command still refuses unless the account has no open position, order
+  state is certain, and a same-mode reconciliation passed within the last hour.
 - LIVE configuration must enable email or Telegram. Before unlock/startup, the
   gate performs a read-only SMTP or Telegram-chat connectivity probe; a failed
   probe refuses LIVE. A separately received test alert remains an operator

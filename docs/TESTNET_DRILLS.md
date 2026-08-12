@@ -5,6 +5,13 @@ machinery *actually fire* against a live exchange — something the ~30 USDT
 paper account almost never triggers. Record each outcome on
 `docs/LIVE_TRADING_CHECKLIST.md`.
 
+The final uninterrupted two-week evidence clock restarts after any change to
+the trading loop, risk engine, execution/gateway, exit management, or
+accounting. Research-only, documentation, CLI wording, watchdog, and test-only
+changes do not restart it. Record the deployed commit and UTC start time rather
+than adjudicating changes after the fact. The consecutive-loss recovery change
+is a risk-engine change, so its testnet deployment restarts this clock.
+
 Set an alias first so the commands are short:
 ```bash
 cd ~/trading-bot
@@ -96,14 +103,18 @@ Testnet accounts are pre-funded with large fake balances, so the strategy
 **will** place orders (unlike the paper account). Watch for these over the
 drill period:
 
-- [ ] **Entries actually happen** — `report performance` shows opened trades.
+- [x] **Entries actually happen** — `report performance` shows opened trades.
 - [ ] **Stop-loss exits work** — the resting `STOP_LOSS_LIMIT` fills, or the
       software monitor escalates to a market exit on a gap-through. Confirm a
       position closes on a downward move.
 - [ ] **Daily-loss brake** (`max_daily_loss_pct: 2`) — after enough intraday
       loss, new entries stop for the day.
-- [ ] **Consecutive-loss pause** (`pause_after_consecutive_losses: 3`) — three
-      losing trades → trading pauses; you get a critical alert.
+- [x] **Consecutive-loss pause engages** (`pause_after_consecutive_losses: 3`)
+      — three losing trades latched the brake and a critical alert was emitted.
+- [ ] **Consecutive-loss recovery drill** — after deploying the dedicated
+      acknowledgement path, prove early/open-position/unknown-order refusals,
+      successful review with dust present, idempotent retry, restart survival,
+      and backup/restore survival.
 - [ ] **Drawdown brake** (`max_drawdown_pct: 8`) — entries stop past the
       drawdown ceiling.
 - [ ] **Entries rejected for the RIGHT reasons** — review the logs/report for
@@ -170,5 +181,27 @@ OK, 5 trades / 1 win. Every drill's state change was reverted afterwards.
 
 - [ ] **A1 with an OPEN POSITION** — needs a live position; confirm the
       position and its resting stop survive a restart.
-- [ ] **Section B brake engagement** — daily-loss, consecutive-loss and
-      drawdown brakes need losing trades to accumulate (5 trades so far).
+- [ ] **Remaining Section B brake engagement** — daily-loss and drawdown
+      brakes still need losing trades to accumulate.
+
+---
+
+## Drill run 2 — 2026-08-12 (testnet observation)
+
+Across 30 entry signals, 5 were approved and 20 were refused by
+`CONSECUTIVE_LOSS_PAUSE`; cooldown and max-entries-per-day refusals accounted
+for the remaining blocked signals. This is valid live-condition evidence that
+the consecutive-loss brake, cooldown, and daily-entry cap engage and that
+rejected entries do not reach submission.
+
+The inspection also found that the original streak was derived from all closed
+position history and had no supported recovery path: entries were needed to
+produce a winning close, but the pause blocked every entry. The corrected
+design is a latched manual-review brake with an append-only position watermark
+and dedicated acknowledgement command. It intentionally does not time-decay.
+
+The corrected build has not yet been deployed in this record. Deployment must
+start a new two-week evidence clock and the acknowledgement recovery drill is
+the first required exercise. Remaining Section B evidence is daily-loss and
+max-drawdown engagement. A1 with an open position and a protective-stop exit
+also remain outstanding.

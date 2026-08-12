@@ -11,6 +11,7 @@ import argparse
 import getpass
 import json
 import logging
+import shlex
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -31,6 +32,11 @@ from trading_bot.reporting.performance import (
     max_drawdown_pct,
     ratio_metrics,
     trade_stats,
+)
+from trading_bot.risk.loss_pause import (
+    ConsecutiveLossPauseService,
+    LossPauseAcknowledgementError,
+    LossPauseStateError,
 )
 from trading_bot.security.livegate import LiveGate
 from trading_bot.security.secrets import EnvSecretProvider
@@ -61,6 +67,13 @@ def _actor() -> str:
         return getpass.getuser()
     except Exception:
         return "operator"
+
+
+def _loss_pause_ack_command(config_path: str) -> str:
+    return (
+        f"python -m trading_bot --config {shlex.quote(config_path)} "
+        "risk acknowledge-loss-pause --note '<review and decision>'"
+    )
 
 
 # ======================================================================
@@ -98,9 +111,17 @@ def cmd_status(args) -> int:
     position = repos.positions.open_position(mode)
     day = datetime.now(UTC).strftime("%Y-%m-%d")
     de = repos.daily_equity.get(day, mode)
-    last_recon = repos.events.last_reconciliation()
+    last_recon = repos.events.last_reconciliation(mode)
     last_decision = repos.decisions.last_decision(mode)
     pending = repos.orders.non_terminal_orders(mode)
+    try:
+        loss_pause = ConsecutiveLossPauseService(repos, cfg, RealClock()).status()
+    except LossPauseStateError as exc:
+        print(
+            f"CRITICAL: consecutive-loss pause state is invalid; entries fail closed: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     endpoint = {
         Mode.PAPER: "paper simulator (public market data only)",
@@ -138,6 +159,14 @@ Risk limits:         risk/trade {r.max_risk_per_trade_pct}% | alloc {r.max_posit
                      daily loss {r.max_daily_loss_pct}% | 7d loss {r.max_7d_loss_pct}% | drawdown {r.max_drawdown_pct}%
                      entries/day {r.max_entries_per_day} | cooldown {r.cooldown_after_loss_hours}h | pause after {r.pause_after_consecutive_losses} losses
 
+Loss-streak brake:   {'ACTIVE — DOES NOT CLEAR WITH TIME' if loss_pause.active else 'inactive'}
+Loss streak:         effective {loss_pause.effective_streak} | raw history {loss_pause.raw_streak}
+Latched since:       {loss_pause.active_since.isoformat() if loss_pause.active_since else '(not active)'}
+Earliest review:     {loss_pause.minimum_ack_at.isoformat() if loss_pause.minimum_ack_at else '(not active)'}
+Last acknowledgement:{(' ' + loss_pause.latest_acknowledgement['acknowledged_at'] + ' by ' + loss_pause.latest_acknowledgement['actor']) if loss_pause.latest_acknowledgement else ' (none)'}
+Last review note:    {loss_pause.latest_acknowledgement['note'] if loss_pause.latest_acknowledgement else '(none)'}
+Acknowledgement:     {_loss_pause_ack_command(args.config)}
+
 Last market update:  {latest['ts'] if latest else '(never)'}
 Last reconciliation: {(last_recon['ts'] + (' OK' if last_recon['ok'] else ' MISMATCH')) if last_recon else '(never)'}
 Last decision:       {(last_decision['ts'] + ' ' + str(last_decision['signal_action']) + ' — ' + str(last_decision['explanation'] or '')) if last_decision else '(never)'}
@@ -172,10 +201,21 @@ def cmd_stop(args) -> int:
 
 def cmd_resume(args) -> int:
     cfg, db, repos = _load(args)
+    try:
+        loss_pause = ConsecutiveLossPauseService(repos, cfg, RealClock()).status()
+    except LossPauseStateError as exc:
+        print(f"REFUSED: loss-pause state is invalid and must fail closed: {exc}")
+        return 1
     kill = KillSwitch(repos)
     blockers = kill.reset(_actor(), args.note or "")
     ApprovalService(repos, cfg, RealClock()).resume(_actor(), args.note or "")
     AuditLog(db).append("cli.resume", {"actor": _actor(), "note": args.note or ""})
+    if loss_pause.active:
+        blockers.append(
+            "the consecutive-loss pause remains latched; `resume` cannot clear it. "
+            "This pause DOES NOT CLEAR WITH TIME. Complete operator review, then run: "
+            f"{_loss_pause_ack_command(args.config)}"
+        )
     if blockers:
         print("kill switch partially reset; remaining blockers:")
         for b in blockers:
@@ -184,6 +224,43 @@ def cmd_resume(args) -> int:
     print(
         "kill switch reset and pause cleared. "
         "(DAILY_APPROVAL mode still requires `approve` before entries resume.)"
+    )
+    return 0
+
+
+def cmd_acknowledge_loss_pause(args) -> int:
+    cfg, db, repos = _load(args)
+    service = ConsecutiveLossPauseService(repos, cfg, RealClock())
+    actor = _actor()
+    try:
+        with db.transaction():
+            result = service.acknowledge(actor, args.note)
+            if result.created:
+                AuditLog(db).append(
+                    "risk.consecutive_loss_pause_acknowledged",
+                    {
+                        "actor": actor,
+                        "mode": cfg.mode.value,
+                        "watermark_position_id": result.record["watermark_position_id"],
+                        "watermark_closed_at": result.record["watermark_closed_at"],
+                        "streak_count": int(result.record["streak_count"]),
+                        "note": args.note.strip(),
+                    },
+                )
+    except LossPauseAcknowledgementError as exc:
+        print("REFUSED: consecutive-loss pause acknowledgement conditions are not met:")
+        for blocker in exc.blockers:
+            print(f"  - {blocker}")
+        return 1
+    except LossPauseStateError as exc:
+        print(f"REFUSED: loss-pause state is invalid and must fail closed: {exc}")
+        return 1
+
+    action = "recorded" if result.created else "already recorded (idempotent retry)"
+    print(f"consecutive-loss review acknowledgement {action} for {cfg.mode.value} mode.")
+    print(
+        f"effective streak is now {result.state.effective_streak}; "
+        f"raw loss history remains {result.state.raw_streak}."
     )
     return 0
 
@@ -504,6 +581,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("approve", help="approve trading window (DAILY_APPROVAL)")
     ap.add_argument("--hours", type=int, default=None)
     ap.set_defaults(fn=cmd_approve)
+
+    risk = sub.add_parser("risk", help="risk-brake operator actions")
+    risk_sub = risk.add_subparsers(dest="risk_cmd", required=True)
+    ack = risk_sub.add_parser(
+        "acknowledge-loss-pause",
+        help="record reviewed recovery from a latched consecutive-loss pause",
+    )
+    ack.add_argument("--note", required=True, help="mandatory operator review and decision")
+    ack.set_defaults(fn=cmd_acknowledge_loss_pause)
 
     sub.add_parser(
         "close-position-preview", help="preview closing the open position (no order)"

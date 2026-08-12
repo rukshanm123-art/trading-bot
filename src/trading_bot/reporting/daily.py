@@ -22,6 +22,7 @@ from trading_bot.core.types import HUNDRED, ZERO, dec
 from trading_bot.exchange.interface import Clock
 from trading_bot.notifications.adapters import NotificationHub
 from trading_bot.reporting.performance import benchmark_comparison, trade_stats
+from trading_bot.risk.loss_pause import ConsecutiveLossPauseService
 from trading_bot.storage.repositories import Repositories
 
 log = logging.getLogger(__name__)
@@ -125,7 +126,8 @@ class DailyReportBuilder:
 
         alerts = self.repos.events.alerts_between(utc_start, utc_end)
         api_errors = self.repos.events.api_errors_between(utc_start, utc_end)
-        consecutive_losses = self.repos.positions.consecutive_losses(mode)
+        loss_pause = ConsecutiveLossPauseService(self.repos, self.cfg, self.clock).status()
+        consecutive_losses = loss_pause.effective_streak
 
         peak = self.repos.balances.peak_equity(mode) or equity_now
         drawdown_pct = (peak - equity_now) / peak * HUNDRED if peak > ZERO else ZERO
@@ -169,6 +171,8 @@ class DailyReportBuilder:
             ),
             "open_position": position_view,
             "consecutive_losses": consecutive_losses,
+            "raw_consecutive_losses": loss_pause.raw_streak,
+            "consecutive_loss_pause": loss_pause.as_dict(),
             "current_drawdown_pct": str(drawdown_pct.quantize(Decimal("0.01"))),
             "signal_counts": signal_counts,
             "rejected_entries": rejected_entries,
@@ -236,7 +240,7 @@ class DailyReportBuilder:
             f"| Unrealised P&L | {r['unrealized_pnl']} {q} |",
             f"| Fees | {r['fees_today']} {q} |",
             f"| Current drawdown | {r['current_drawdown_pct']}% |",
-            f"| Consecutive losses | {r['consecutive_losses']} |",
+            f"| Consecutive losses (effective / raw) | {r['consecutive_losses']} / {r['raw_consecutive_losses']} |",
             "",
             "## Activity",
             "",
@@ -273,6 +277,25 @@ class DailyReportBuilder:
             ]
         if r["kill_switch_active"]:
             lines += ["", f"> ⛔ **KILL SWITCH ACTIVE**: {r['kill_switch_reason']}"]
+        loss_pause = r["consecutive_loss_pause"]
+        if loss_pause["active"]:
+            lines += [
+                "",
+                "> ⛔ **CONSECUTIVE-LOSS PAUSE ACTIVE — THIS DOES NOT CLEAR WITH TIME.**",
+                f"> Latched since: {loss_pause['active_since']}",
+                f"> Earliest operator acknowledgement: {loss_pause['minimum_ack_at']}",
+                f"> Recovery command: `{ConsecutiveLossPauseService.ACK_COMMAND}`",
+            ]
+        if loss_pause["latest_acknowledgement"]:
+            ack = loss_pause["latest_acknowledgement"]
+            lines += [
+                "",
+                "## Last consecutive-loss review",
+                "",
+                f"- Acknowledged: {ack['acknowledged_at']} by {ack['actor']}",
+                f"- Watermark position: {ack['watermark_position_id']}",
+                f"- Review note: {ack['note']}",
+            ]
         lines += [
             "",
             "## Health",

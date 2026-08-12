@@ -73,6 +73,7 @@ from trading_bot.portfolio.accounting import PortfolioService
 from trading_bot.portfolio.reconciliation import Reconciler
 from trading_bot.reporting.daily import DailyReportBuilder
 from trading_bot.risk.engine import GateContext, RiskEngine
+from trading_bot.risk.loss_pause import ConsecutiveLossPauseService
 from trading_bot.risk.sizing import size_exit_qty
 from trading_bot.risk.state import RiskStateService
 from trading_bot.security.livegate import LiveGate
@@ -209,7 +210,8 @@ class TradingEngine:
             self.data_source, cfg, self.clock, min_candles=self.strategy.warmup
         )
         self.risk_engine = RiskEngine(cfg, fee_bps)
-        self.risk_state = RiskStateService(self.repos, cfg, self.clock)
+        self.loss_pause = ConsecutiveLossPauseService(self.repos, cfg, self.clock)
+        self.risk_state = RiskStateService(self.repos, cfg, self.clock, self.loss_pause)
         self.kill_switch = KillSwitch(self.repos, stop_file_dir=self.root)
         self.circuit = CircuitBreaker(cfg, self.kill_switch)
         self.approval = ApprovalService(self.repos, cfg, self.clock)
@@ -1074,12 +1076,9 @@ class TradingEngine:
     def _post_exit_bookkeeping(self, realized) -> None:
         if realized < ZERO:
             METRICS.inc("bot_losing_trades_total")
-            consecutive = self.repos.positions.consecutive_losses(self.cfg.mode)
-            if consecutive >= self.cfg.risk.pause_after_consecutive_losses:
-                msg = (
-                    f"{consecutive} consecutive losses — entries paused by risk engine "
-                    f"(cooldown {self.cfg.risk.cooldown_after_loss_hours}h)"
-                )
+            state = self.loss_pause.status()
+            if state.active:
+                msg = self.loss_pause.active_alert_message(state)
                 delivered = self.hub.send("Consecutive-loss pause", msg, "critical")
                 self.repos.events.alert("critical", "consecutive_loss_pause", msg, delivered)
 

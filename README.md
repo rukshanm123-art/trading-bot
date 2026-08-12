@@ -117,6 +117,8 @@ Useful commands:
 python -m trading_bot status                     # full status
 python -m trading_bot stop                       # kill switch ON
 python -m trading_bot resume --note "why"        # manual reset
+python -m trading_bot --config config/testnet.yaml risk acknowledge-loss-pause \
+  --note "review and decision"                    # separate latched risk brake
 python -m trading_bot pause / approve --hours 24 # daily continuation control
 python -m trading_bot report daily               # markdown daily report
 python -m trading_bot report performance         # stats + benchmarks
