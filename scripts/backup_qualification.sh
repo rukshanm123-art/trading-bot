@@ -39,6 +39,18 @@ fi
 log() { echo "$(date -u +%H:%M:%SZ) $*"; }
 fail() { echo "BACKUP FAILED: $*" >&2; exit 1; }
 
+STAGED=""
+SCRATCH=""
+cleanup() {
+    # A trap STRING containing "${COMPOSE[@]}" word-splits and corrupts the
+    # handler, so cleanup lives in a function where the array expands normally.
+    [[ -n "$STAGED" ]] && "${COMPOSE[@]}" exec -T db rm -f "$STAGED" >/dev/null 2>&1
+    [[ -n "$SCRATCH" ]] && "${COMPOSE[@]}" exec -T db dropdb -U "$DB_USER" \
+        --if-exists "$SCRATCH" >/dev/null 2>&1
+    return 0
+}
+trap cleanup EXIT
+
 mkdir -p "$DEST"
 log "backing up to $DEST"
 
@@ -74,8 +86,6 @@ log "checksums written"
 STAGED=/tmp/verify_${STAMP}.dump
 "${COMPOSE[@]}" exec -T db sh -c "cat > $STAGED" < "$DEST/$DB_NAME.dump" \
     || fail "could not stage the dump inside the db container"
-# shellcheck disable=SC2064
-trap "\"${COMPOSE[@]}\" exec -T db rm -f '$STAGED' >/dev/null 2>&1 || true" EXIT
 
 if "${COMPOSE[@]}" exec -T db pg_restore --list "$STAGED" > "$DEST/toc.txt" 2>/dev/null; then
     log "dump TOC readable ($(wc -l < "$DEST/toc.txt") entries)"
@@ -88,12 +98,9 @@ fi
 # THROWAWAY database on the same server (never touching the live one) and
 # checks the rows that qualification depends on.
 if [[ $VERIFY_RESTORE -eq 1 ]]; then
-    SCRATCH="restore_check_$(date -u +%s)"
+    SCRATCH="restore_check_$(date -u +%s)"  # cleaned up by the EXIT trap
     log "restore drill into scratch database $SCRATCH ..."
     "${COMPOSE[@]}" exec -T db createdb -U "$DB_USER" "$SCRATCH" || fail "createdb failed"
-    # shellcheck disable=SC2064
-    trap "\"${COMPOSE[@]}\" exec -T db rm -f '$STAGED' >/dev/null 2>&1 || true; \
-          \"${COMPOSE[@]}\" exec -T db dropdb -U '$DB_USER' --if-exists '$SCRATCH' >/dev/null 2>&1 || true" EXIT
 
     "${COMPOSE[@]}" exec -T db pg_restore -U "$DB_USER" -d "$SCRATCH" "$STAGED" \
         >/dev/null 2>&1 || fail "pg_restore into scratch failed"
