@@ -114,7 +114,11 @@ drill period:
 - [ ] **Consecutive-loss recovery drill** — after deploying the dedicated
       acknowledgement path, prove early/open-position/unknown-order refusals,
       successful review with dust present, idempotent retry, restart survival,
-      and backup/restore survival.
+      and backup/restore survival. **Partial operational pass on 2026-08-13:**
+      normal acknowledgement, idempotency, restart, and backup/restore passed;
+      Testnet had no dust/open/unknown state to exercise those refusal paths
+      against the exchange-backed database (the automated safety tests cover
+      them).
 - [ ] **Drawdown brake** (`max_drawdown_pct: 8`) — entries stop past the
       drawdown ceiling.
 - [ ] **Entries rejected for the RIGHT reasons** — review the logs/report for
@@ -205,3 +209,52 @@ start a new two-week evidence clock and the acknowledgement recovery drill is
 the first required exercise. Remaining Section B evidence is daily-loss and
 max-drawdown engagement. A1 with an open position and a protective-stop exit
 also remain outstanding.
+
+---
+
+## Drill run 3 — 2026-08-13 (loss-pause recovery deployment)
+
+The corrected risk-engine build was deployed to the Testnet VM from clean
+`main` at commit `c72479eaf48797f12d7a041cd26940cc6071b5d1`. The container
+stamp records build time `2026-08-13T04:57:46Z`. GitHub Actions run
+`31638763314` passed for that exact commit, including PostgreSQL 16 and all
+quality/security jobs. A pre-deployment database backup was written to
+`var/backups/pre-loss-pause-c72479e.db` before the migration.
+
+Pre-review state was deliberately safe: the bot was flat, with no pending or
+unknown orders, current Testnet reconciliation `OK`, and the new brake active
+at effective/raw streak `3/3`. The generic `resume` command returned non-zero
+and left that latch active, proving it cannot bypass the dedicated review path.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Fixed build deployed | PASS | image commit `c72479eaf48797f12d7a041cd26940cc6071b5d1`; startup reconciliation OK |
+| Generic `resume` cannot clear latch | PASS | command returned 1; effective/raw streak stayed `3/3` |
+| Dedicated acknowledgement | PASS | review recorded at `2026-08-13T05:02:56.275573Z`; effective streak became 0 while raw history stayed 3 |
+| Idempotent retry | PASS | repeating the identical command left exactly 1 acknowledgement row and 1 matching audit event |
+| Audit integrity | PASS | `audit verify` returned `audit chain OK` before and after restart |
+| Backup/restore survival | PASS | `post-loss-pause-c72479e.db` contains the single acknowledgement and audit event; audit verification and `PRAGMA integrity_check` both passed |
+| Restart survival | PASS | after the conservative stale-heartbeat takeover, container healthy, reconciliation OK at `2026-08-13T05:10:15.433840Z`, effective/raw streak still `0/3`, acknowledgement/audit counts still `1/1` |
+
+The restart exposed an operational characteristic rather than a bypass: Docker
+restart did not release the database instance lease immediately, so repeated
+starts correctly refused ownership until the approximately 120-second stale
+heartbeat window expired. The replacement instance acquired the lock at
+`2026-08-13T05:10:15Z`; no lock was deleted or force-cleared.
+
+The authoritative Testnet database had zero dust positions and no open or
+unknown-order state during this review. Therefore, this run does **not** claim
+exchange-backed proof of acknowledgement with dust or of the unsafe-state
+refusals. The clean test suite proves those paths, including acknowledgement
+with dust, early/open-position/unknown-order refusal, transactional rollback,
+idempotency, and backup restoration. A future naturally occurring suitable
+Testnet state can close the remaining operational-evidence wording without
+manufacturing exchange state.
+
+The new fixed-build evidence clock starts at
+`2026-08-13T05:10:15Z` and reaches two weeks at
+`2026-08-27T05:10:15Z`, provided no trading-loop, risk, execution/gateway,
+exit-management, or accounting change is deployed. Documentation-only changes
+do not restart it. Still outstanding: A1 with an open position, a real
+protective-stop exit, daily-loss engagement, and max-drawdown engagement.
+LIVE remains **NO-GO**.

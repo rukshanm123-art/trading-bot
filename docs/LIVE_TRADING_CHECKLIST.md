@@ -50,11 +50,17 @@ and no automatic promotion; the engine re-verifies gates at every startup.
 - [ ] Final uninterrupted 2-week clock is tied to one deployed commit. Restart
       it after trading-loop, risk, execution/gateway, exit-management, or
       accounting changes; research/docs/wording/watchdog/test-only changes do
-      not reset it.
+      not reset it. Current clock: commit `c72479e`,
+      `2026-08-13T05:10:15Z` through `2026-08-27T05:10:15Z` if no qualifying
+      code change is deployed.
 - [x] Consecutive-loss, cooldown, and daily-entry-cap brakes engaged and
       blocked entries for the recorded reason codes.
 - [ ] Dedicated consecutive-loss acknowledgement recovery drill passed,
-      including dust, idempotency, restart, and database restore.
+      including dust, idempotency, restart, and database restore. Partial pass
+      on `c72479e`: acknowledgement, idempotent retry, audit integrity,
+      restart, and backup/restore passed; the Testnet database had no dust,
+      open position, or unknown order for exchange-backed proof of those
+      scenario-specific gates (covered by automated safety tests).
 - [ ] Daily-loss and max-drawdown brakes engaged and blocked new entries.
 - [ ] Normal operation for 2+ weeks, then deliberate failure drills:
   - [ ] disconnect the network mid-session (expect EXCHANGE_UNAVAILABLE,
