@@ -54,6 +54,11 @@ trap cleanup EXIT
 mkdir -p "$DEST"
 log "backing up to $DEST"
 
+# Sweep debris from any run that died before its cleanup ran (a killed shell,
+# an OOM, an earlier bug). Staged dumps are a few MB each and would otherwise
+# accumulate in the db container until it restarts.
+"${COMPOSE[@]}" exec -T db sh -c 'rm -f /tmp/verify_*.dump' >/dev/null 2>&1 || true
+
 # ---- 1. PostgreSQL (decisions, positions, reports, evidence HMAC key) -------
 log "pg_dump ..."
 "${COMPOSE[@]}" exec -T db pg_dump -U "$DB_USER" -d "$DB_NAME" -Fc \
